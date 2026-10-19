@@ -9,6 +9,7 @@ import { Alert } from '@/components/ui/Alert';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { SessionTimerCard } from '@/components/session/SessionTimerCard';
 
 export default function BookingDetailPage() {
   const { id } = useParams();
@@ -18,12 +19,16 @@ export default function BookingDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
-  useEffect(() => {
+  function loadBooking() {
     if (!id) return;
     bookingsApi.getById(id)
       .then(setBooking)
       .catch((err) => setError(parseApiError(err).message))
       .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    loadBooking();
   }, [id]);
 
   async function handleCancel() {
@@ -58,6 +63,13 @@ export default function BookingDetailPage() {
 
       {error && <Alert tone="error">{error}</Alert>}
       {success && <Alert tone="success">{success}</Alert>}
+
+      <SessionTimerCard
+        bookingId={booking._id}
+        isTrainer={false}
+        bookingStatus={booking.status}
+        onStatusChange={loadBooking}
+      />
 
       <Card className="space-y-4">
         <div className="flex items-center gap-3 text-slate-700">

@@ -1,6 +1,7 @@
 import type { RequestHandler } from 'express';
 import { z } from 'zod';
 import { Booking } from '../models/Booking.js';
+import { AssignmentDecision } from '../models/AssignmentDecision.js';
 import { createBooking } from '../services/booking.service.js';
 import { AppError } from '../utils/AppError.js';
 
@@ -37,6 +38,35 @@ export const getMyBookings: RequestHandler = async (req, res) => {
     .sort({ startAt: -1 });
 
   res.json({ bookings });
+};
+
+export const getAssignedBookings: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+
+  const bookings = await Booking.find({ trainerId: req.auth.id })
+    .populate('societyId')
+    .sort({ startAt: -1 });
+
+  res.json({ bookings });
+};
+
+export const getAllBookingsAdmin: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+
+  const bookings = await Booking.find({})
+    .populate('societyId')
+    .sort({ createdAt: -1 });
+
+  res.json({ bookings });
+};
+
+export const getAssignmentDecisionsAdmin: RequestHandler = async (_req, res) => {
+  const decisions = await AssignmentDecision.find({})
+    .populate('societyId')
+    .sort({ createdAt: -1 })
+    .limit(50);
+
+  res.json({ decisions });
 };
 
 export const getBookingById: RequestHandler = async (req, res) => {

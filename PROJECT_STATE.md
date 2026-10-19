@@ -9,25 +9,24 @@ Last updated: 19 Oct 2026   Last AI used: Gemini
 - [x] 4 Booking Core & Concurrency Locks
 - [x] 5 Payments + Packages (with Razorpay Checkout Popup Modal)
 - [x] 6 Cancel/reschedule + Notifications
-- [ ] 7 Session Timer
-- [ ] 8 Records + AI
+- [x] 7 Session Timer & Authoritative Ticker
+- [x] 8 Records + AI Recommendations
 - [ ] 9 Admin Console
 - [ ] 10 Tests, Docs, Deploy, Video
 
-## ACHIEVEMENTS IN THIS STEP (Razorpay Integration & Instant Auto-Slot Fixes)
-- Added `loadRazorpayScript` utility in `frontend/src/lib/razorpay.ts` to dynamically inject `v1/checkout.js`.
-- Integrated real Razorpay test checkout popup modal into `BookPage.tsx` and `PackagesPage.tsx`.
-- Updated Instant booking mode logic to automatically select the next immediate 15-minute atom starting within 60 minutes.
-- Maintained stacked active package balances permitting seamless package repurchases.
-- Verified backend cryptographic HMAC-SHA256 signature verification logic using `RAZORPAY_KEY_SECRET`.
+## ACHIEVEMENTS IN THIS STEP (Phase 8: Session Records & AI Recommendations)
+- Created `SessionRecord` database model capturing completed exercises, total duration, trainer notes, customer rating/feedback, and suggested follow-ups.
+- Built server-side Gemini AI service (`ai.service.ts`) using standard REST calls to Google Gemini API with fallback heuristic recommendations when offline.
+- Built post-workout exercise logging form for trainers to record structured workout data upon session completion.
+- Created customer feedback widget on booking detail views allowing ratings and review notes[cite: 12].
+- Integrated AI Recommendation widget (`AiRecommendationCard.tsx`) on `CustomerDashboard` generating custom workouts based on age, goals, experience level, and past session logs[cite: 12].
 
 ## NEXT STEP
-Phase 7: Live Session Timer & Authoritative Ticker (Server-side timestamps, 55-minute buzzer, status polling, clock skew offset).
+Phase 9: Admin Operations & Pricing Management Console (Full system pricing override controls, society commissions, system health metrics).
 
 ## Decisions
-- Frontend dynamically triggers the Razorpay popup using `VITE_RAZORPAY_KEY_ID`.
-- Instant session mode automatically calculates the immediate next 15-minute slot from server time.
-- All monetary transactions run in integer paise.
+- Gemini API key stays strictly on the backend (`LLM_API_KEY`).
+- AI recommendations fall back gracefully to a rules-based engine if network calls to Gemini time out or lack an API key[cite: 13].
 
 ## Demo accounts (Password: Demo@12345)
 customer@demo.test, customer2@demo.test, trainer1@demo.test to trainer5@demo.test, admin@demo.test

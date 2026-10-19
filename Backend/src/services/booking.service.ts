@@ -6,6 +6,7 @@ import { AssignmentDecision } from '../models/AssignmentDecision.js';
 import { findBestTrainerForSlot } from './assignment.service.js';
 import { calculateQuoteForDate } from './pricing.service.js';
 import { ceilToAtom, getSessionAtoms } from './time.js';
+import { sendNotification } from './notification.service.js';
 import { AppError } from '../utils/AppError.js';
 
 export interface CreateBookingInput {
@@ -18,7 +19,6 @@ export interface CreateBookingInput {
 }
 
 export async function createBooking(input: CreateBookingInput) {
-  // Idempotency check
   if (input.idempotencyKey) {
     const existing = await Booking.findOne({
       customerId: input.customerId,
@@ -27,7 +27,6 @@ export async function createBooking(input: CreateBookingInput) {
     if (existing) return existing;
   }
 
-  // Validate instant booking constraint (starts within 60 mins)
   const now = new Date();
   if (input.mode === 'INSTANT') {
     const maxInstantTime = new Date(now.getTime() + 60 * 60 * 1000);
@@ -56,7 +55,6 @@ export async function createBooking(input: CreateBookingInput) {
   const chosenTrainerId = selection.chosenTrainerId;
   const atoms = getSessionAtoms(roundedStart);
 
-  // Database transaction for atomic slot locking
   const session = await mongoose.startSession();
   session.startTransaction();
 
@@ -85,7 +83,6 @@ export async function createBooking(input: CreateBookingInput) {
 
     await bookingDoc.save({ session });
 
-    // Insert 4 slot locks (1 per 15-minute atom)
     const locks = atoms.map((atom) => ({
       trainerId: chosenTrainerId,
       atomStart: atom,
@@ -112,6 +109,14 @@ export async function createBooking(input: CreateBookingInput) {
 
     await session.commitTransaction();
     session.endSession();
+
+    // Trigger in-app notification for the assigned trainer
+    await sendNotification(
+      chosenTrainerId,
+      'BOOKING_ASSIGNED',
+      `New workout session assigned for ${roundedStart.toLocaleString()}!`,
+      bookingDoc._id.toString(),
+    );
 
     return bookingDoc;
   } catch (err) {

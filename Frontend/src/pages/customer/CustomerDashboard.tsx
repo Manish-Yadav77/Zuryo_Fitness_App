@@ -1,96 +1,91 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { CalendarCheck, CheckCircle2, ClipboardList, Dumbbell, Wallet } from 'lucide-react';
+import {  PlusCircle} from 'lucide-react';
+import { bookingsApi } from '@/api/bookings.api';
+import type { Booking } from '@/types/booking';
 import { useAuth } from '@/hooks/useAuth';
-import { firstName, getGreeting } from '@/lib/format';
-import { assessmentApi } from '@/api/assessment.api';
-import type { FitnessAssessment } from '@/types/assessment';
 import { Badge } from '@/components/ui/Badge';
-import { Button } from '@/components/ui/Button';
-import { Card, StatCard } from '@/components/ui/Card';
-import { PageHeader } from '@/components/ui/PageHeader';
+import { Card } from '@/components/ui/Card';
+import { AiRecommendationCard } from '@/components/ai/AiRecommendationCard';
 
 export default function CustomerDashboard() {
   const { user } = useAuth();
-  const [assessment, setAssessment] = useState<FitnessAssessment | null>(null);
+  const [bookings, setBookings] = useState<Booking[]>([]);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    assessmentApi.getMine().then((data) => {
-      setAssessment(data.assessment);
-    }).catch(console.error);
+    bookingsApi.getMine()
+      .then(setBookings)
+      .catch(console.error)
+      .finally(() => setLoading(false));
   }, []);
 
-  if (!user) return null;
+  const upcoming = bookings.filter((b) => ['CONFIRMED', 'IN_PROGRESS'].includes(b.status));
+  const completed = bookings.filter((b) => b.status === 'COMPLETED');
+
+  if (loading) return <div className="py-10 text-center text-slate-500">Loading your fitness dashboard...</div>;
 
   return (
-    <>
-      <PageHeader
-        title={`${getGreeting()}, ${firstName(user.name)}`}
-        subtitle="Here is a quick look at your fitness journey."
-      />
-
-      <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-        <StatCard label="Sessions remaining" value="-" caption="Packages arrive in a later phase" icon={Wallet} />
-        <StatCard label="Upcoming bookings" value="-" caption="Booking arrives in a later phase" icon={CalendarCheck} />
-        <StatCard label="Completed sessions" value="-" caption="History arrives in a later phase" icon={CheckCircle2} />
+    <div className="mx-auto max-w-4xl space-y-6">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold text-slate-900">Welcome back, {user?.name}!</h1>
+          <p className="text-sm text-slate-500">Track your workouts and personalized AI recommendations.</p>
+        </div>
+        <Link
+          to="/customer/book"
+          className="flex items-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-emerald-700"
+        >
+          <PlusCircle className="h-4 w-4" /> Book Session
+        </Link>
       </div>
 
-      {!assessment ? (
-        <Card className="mt-6 border-amber-200 bg-amber-50/50">
-          <div className="flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center">
-            <div className="flex items-start gap-3">
-              <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-amber-100 text-amber-700">
-                <ClipboardList className="h-5 w-5" />
-              </span>
-              <div>
-                <h3 className="font-semibold text-slate-900">Complete your Fitness Assessment</h3>
-                <p className="mt-0.5 text-xs text-slate-600">Tell us your age, weight, and fitness goals to help trainers tailor your sessions.</p>
-              </div>
-            </div>
-            <Link to="/customer/assessment">
-              <Button variant="primary">Start Assessment</Button>
-            </Link>
-          </div>
+      {/* Metrics Header */}
+      <div className="grid gap-4 sm:grid-cols-3">
+        <Card>
+          <span className="text-xs font-semibold text-slate-500 uppercase">Upcoming Sessions</span>
+          <p className="mt-2 text-3xl font-extrabold text-emerald-600">{upcoming.length}</p>
         </Card>
-      ) : (
-        <Card className="mt-6">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <h3 className="font-semibold text-slate-900">Your Fitness Profile Summary</h3>
-            <Badge tone="emerald">Version {assessment.version}</Badge>
-          </div>
-          <div className="mt-4 grid grid-cols-2 gap-4 text-sm sm:grid-cols-4">
-            <div>
-              <p className="text-xs text-slate-500">Level</p>
-              <p className="font-medium capitalize text-slate-900">{assessment.level}</p>
-            </div>
-            <div>
-              <p className="text-xs text-slate-500">Weight & Age</p>
-              <p className="font-medium text-slate-900">{assessment.weightKg} kg, {assessment.age} yrs</p>
-            </div>
-            <div className="col-span-2">
-              <p className="text-xs text-slate-500">Primary Goals</p>
-              <p className="font-medium text-slate-900">{assessment.goals.join(', ')}</p>
-            </div>
-          </div>
+        <Card>
+          <span className="text-xs font-semibold text-slate-500 uppercase">Workouts Completed</span>
+          <p className="mt-2 text-3xl font-extrabold text-slate-900">{completed.length}</p>
         </Card>
-      )}
+        <Card>
+          <span className="text-xs font-semibold text-slate-500 uppercase">Total Bookings</span>
+          <p className="mt-2 text-3xl font-extrabold text-slate-900">{bookings.length}</p>
+        </Card>
+      </div>
 
-      <Card className="mt-6 flex flex-col items-start gap-4 bg-linear-to-br from-emerald-600 to-teal-600 text-white ring-0 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-start gap-4">
-          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-white/15 ring-1 ring-white/25">
-            <Dumbbell className="h-6 w-6" aria-hidden="true" />
-          </span>
-          <div>
-            <h2 className="text-lg font-semibold">Book a trainer</h2>
-            <p className="mt-1 max-w-md text-sm text-emerald-50/90">
-              Instant or scheduled 60-minute sessions in your community. Booking opens in Phase 4.
-            </p>
-          </div>
+      {/* AI Recommendation Generator Widget */}
+      <AiRecommendationCard />
+
+      {/* Recent Bookings List */}
+      <Card>
+        <div className="flex items-center justify-between mb-4">
+          <h2 className="text-base font-semibold text-slate-900">Recent Sessions</h2>
+          <Link to="/customer/bookings" className="text-xs font-semibold text-emerald-600 hover:text-emerald-700">
+            View All
+          </Link>
         </div>
-        <Button variant="secondary" disabled>
-          Coming soon
-        </Button>
+
+        {bookings.length === 0 ? (
+          <p className="py-6 text-center text-sm text-slate-500">No sessions booked yet.</p>
+        ) : (
+          <div className="space-y-3">
+            {bookings.slice(0, 3).map((b) => (
+              <Link key={b._id} to={`/customer/bookings/${b._id}`}>
+                <div className="flex items-center justify-between rounded-xl border border-slate-200 bg-slate-50/50 p-3 transition hover:border-emerald-300">
+                  <div>
+                    <span className="font-semibold text-slate-900 text-sm">{b.societyId ? b.societyId.name : 'Residence'}</span>
+                    <p className="text-xs text-slate-500">{new Date(b.startAt).toLocaleString()}</p>
+                  </div>
+                  <Badge tone={b.status === 'CONFIRMED' ? 'emerald' : 'slate'}>{b.status}</Badge>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
       </Card>
-    </>
+    </div>
   );
 }
