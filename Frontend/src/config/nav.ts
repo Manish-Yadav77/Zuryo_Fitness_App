@@ -1,4 +1,4 @@
-import { LayoutDashboard, ReceiptCent as ReceiptPercent } from 'lucide-react';
+import { ClipboardList, LayoutDashboard, ReceiptCent as ReceiptPercent } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { Role } from '@/types/auth';
 
@@ -15,7 +15,10 @@ export const roleHome: Record<Role, string> = {
 };
 
 export const navByRole: Record<Role, NavItem[]> = {
-  customer: [{ label: 'Dashboard', to: '/customer', icon: LayoutDashboard }],
+  customer: [
+    { label: 'Dashboard', to: '/customer', icon: LayoutDashboard },
+    { label: 'Fitness Profile', to: '/customer/assessment', icon: ClipboardList },
+  ],
   trainer: [{ label: 'Dashboard', to: '/trainer', icon: LayoutDashboard }],
   admin: [
     { label: 'Dashboard', to: '/admin', icon: LayoutDashboard },

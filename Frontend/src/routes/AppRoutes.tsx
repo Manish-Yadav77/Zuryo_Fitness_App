@@ -7,6 +7,7 @@ import { useAuth } from '@/hooks/useAuth';
 import LoginPage from '@/pages/auth/LoginPage';
 import SignupPage from '@/pages/auth/SignupPage';
 import CustomerDashboard from '@/pages/customer/CustomerDashboard';
+import AssessmentPage from '@/pages/customer/AssessmentPage';
 import TrainerDashboard from '@/pages/trainer/TrainerDashboard';
 import AdminDashboard from '@/pages/admin/AdminDashboard';
 import PricingPage from '@/pages/admin/PricingPage';
@@ -31,6 +32,7 @@ export function AppRoutes() {
 
           <Route element={<ProtectedRoute roles={['customer']} />}>
             <Route path="/customer" element={<CustomerDashboard />} />
+            <Route path="/customer/assessment" element={<AssessmentPage />} />
           </Route>
 
           <Route element={<ProtectedRoute roles={['trainer']} />}>

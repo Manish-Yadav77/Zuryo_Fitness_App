@@ -3,6 +3,7 @@ import mongoose from 'mongoose';
 import authRoutes from './auth.routes.js';
 import pricingRoutes from './pricing.routes.js';
 import societyRoutes from './society.routes.js';
+import assessmentRoutes from './assessment.routes.js';
 
 const router = Router();
 
@@ -17,5 +18,6 @@ router.get('/health', (_req, res) => {
 router.use('/auth', authRoutes);
 router.use('/pricing', pricingRoutes);
 router.use('/societies', societyRoutes);
+router.use('/assessments', assessmentRoutes);
 
 export default router;
