@@ -1,32 +1,30 @@
-import { Navigate, Route, Routes } from 'react-router-dom'
-import { GuestRoute } from '@/components/auth/GuestRoute'
-import { ProtectedRoute } from '@/components/auth/ProtectedRoute'
-import { AppShell } from '@/components/layout/AppShell'
-import { roleHome } from '@/config/nav'
-import { useAuth } from '@/hooks/useAuth'
-import LoginPage from '@/pages/auth/LoginPage'
-import SignupPage from '@/pages/auth/SignupPage'
-import CustomerDashboard from '@/pages/customer/CustomerDashboard'
-import TrainerDashboard from '@/pages/trainer/TrainerDashboard'
-import AdminDashboard from '@/pages/admin/AdminDashboard'
-import NotFoundPage from '@/pages/NotFoundPage'
+import { Navigate, Route, Routes } from 'react-router-dom';
+import { GuestRoute } from '@/components/auth/GuestRoute';
+import { ProtectedRoute } from '@/components/auth/ProtectedRoute';
+import { AppShell } from '@/components/layout/AppShell';
+import { roleHome } from '@/config/nav';
+import { useAuth } from '@/hooks/useAuth';
+import LoginPage from '@/pages/auth/LoginPage';
+import SignupPage from '@/pages/auth/SignupPage';
+import CustomerDashboard from '@/pages/customer/CustomerDashboard';
+import TrainerDashboard from '@/pages/trainer/TrainerDashboard';
+import AdminDashboard from '@/pages/admin/AdminDashboard';
+import PricingPage from '@/pages/admin/PricingPage';
+import NotFoundPage from '@/pages/NotFoundPage';
 
-/** "/" sends everyone to the home page of their own role. */
 function RoleRedirect() {
-  const { user } = useAuth()
-  return <Navigate to={user ? roleHome[user.role] : '/login'} replace />
+  const { user } = useAuth();
+  return <Navigate to={user ? roleHome[user.role] : '/login'} replace />;
 }
 
 export function AppRoutes() {
   return (
     <Routes>
-      {/* Only for logged-out users */}
       <Route element={<GuestRoute />}>
         <Route path="/login" element={<LoginPage />} />
         <Route path="/signup" element={<SignupPage />} />
       </Route>
 
-      {/* Only for logged-in users, inside the sidebar layout */}
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route path="/" element={<RoleRedirect />} />
@@ -41,11 +39,12 @@ export function AppRoutes() {
 
           <Route element={<ProtectedRoute roles={['admin']} />}>
             <Route path="/admin" element={<AdminDashboard />} />
+            <Route path="/admin/pricing" element={<PricingPage />} />
           </Route>
         </Route>
       </Route>
 
       <Route path="*" element={<NotFoundPage />} />
     </Routes>
-  )
+  );
 }

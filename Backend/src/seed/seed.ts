@@ -3,6 +3,10 @@ import { connectDb, disconnectDb } from '../config/db.js';
 import { env } from '../config/env.js';
 import { User } from '../models/User.js';
 import type { Role } from '../models/User.js';
+import { Society } from '../models/Society.js';
+import { PricingConfig } from '../models/PricingConfig.js';
+import { PackageTemplate } from '../models/PackageTemplate.js';
+import { DEFAULT_PEAK_WINDOWS } from '../services/pricing.service.js';
 
 interface SeedUser {
   name: string;
@@ -10,13 +14,23 @@ interface SeedUser {
   role: Role;
 }
 
-// Synthetic demo data only. All accounts share SEED_PASSWORD from .env (default Demo@12345).
 const SEED_USERS: SeedUser[] = [
   { name: 'Demo Admin', email: 'admin@demo.test', role: 'admin' },
   { name: 'Demo Customer', email: 'customer@demo.test', role: 'customer' },
   { name: 'Aarav Trainer', email: 'trainer1@demo.test', role: 'trainer' },
   { name: 'Diya Trainer', email: 'trainer2@demo.test', role: 'trainer' },
   { name: 'Kabir Trainer', email: 'trainer3@demo.test', role: 'trainer' },
+];
+
+const SEED_SOCIETIES = [
+  { name: 'Prestige Ferns Residency', zoneId: 'zone-bangalore-south', address: 'HSR Layout, Bangalore', location: { lat: 12.9121, lng: 77.6445 }, commissionPercent: 10 },
+  { name: 'Green Glen Layout', zoneId: 'zone-bangalore-east', address: 'Bellandur, Bangalore', location: { lat: 12.9279, lng: 77.6712 }, commissionPercent: 10 },
+  { name: 'Palm Meadows', zoneId: 'zone-bangalore-east', address: 'Whitefield, Bangalore', location: { lat: 12.9698, lng: 77.7499 }, commissionPercent: 10 },
+];
+
+const SEED_PACKAGES = [
+  { name: 'Starter Pack', sessions: 5, pricePaise: 189500, validityDays: 30, description: '5 sessions (5% discount included)' },
+  { name: 'Pro Pack', sessions: 10, pricePaise: 359100, validityDays: 60, description: '10 sessions (10% discount included)' },
 ];
 
 async function seed() {
@@ -29,7 +43,41 @@ async function seed() {
       { $set: { name: u.name, role: u.role, passwordHash, isActive: true } },
       { upsert: true },
     );
-    console.log(`seeded ${u.role.padEnd(8)} ${u.email}`);
+    console.log(`seeded user: ${u.role.padEnd(8)} ${u.email}`);
+  }
+
+  for (const s of SEED_SOCIETIES) {
+    await Society.updateOne(
+      { name: s.name },
+      { $set: { ...s, isActive: true } },
+      { upsert: true },
+    );
+    console.log(`seeded society: ${s.name}`);
+  }
+
+  await PricingConfig.updateOne(
+    { _id: 'default' },
+    {
+      $set: {
+        normalPaise: 39900,
+        peakPaise: 49900,
+        commissionPercent: 10,
+        timezone: 'Asia/Kolkata',
+        peakWindows: DEFAULT_PEAK_WINDOWS,
+        version: 1,
+      },
+    },
+    { upsert: true },
+  );
+  console.log('seeded pricing config');
+
+  for (const p of SEED_PACKAGES) {
+    await PackageTemplate.updateOne(
+      { name: p.name },
+      { $set: { ...p, isActive: true } },
+      { upsert: true },
+    );
+    console.log(`seeded package template: ${p.name}`);
   }
 
   await disconnectDb();

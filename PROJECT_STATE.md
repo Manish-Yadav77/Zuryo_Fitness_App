@@ -1,9 +1,9 @@
 # PROJECT STATE
-Last updated: 19 Oct 2026   Last AI used: Claude
+Last updated: 19 Oct 2026   Last AI used: Gemini
 
 ## Phase checklist
 - [x] 0 Foundation + Auth
-- [ ] 1 Seed data + Pricing
+- [x] 1 Seed data + Pricing Engine
 - [ ] 2 Assessment
 - [ ] 3 Trainers + availability
 - [ ] 4 Booking core
@@ -15,10 +15,10 @@ Last updated: 19 Oct 2026   Last AI used: Claude
 - [ ] 10 Tests, docs, deploy, video
 
 ## NEXT STEP
-Phase 1: Society, PricingConfig, PackageTemplate models; pricing service; /pricing/quote; Pricing page.
+Phase 2: Fitness Assessment (schema, endpoints, customer assessment form, versioned record keeping).
 
 ## Decisions
-Stack and conventions: see ZURYO_MASTER_PLAN.md and ZURYO_ARCHITECTURE_AND_PHASES.md (keep both files in /docs).
+Pricing calculations use integer paise to avoid precision errors. Normal: 39900 paise, Peak: 49900 paise, Commission: 10%.
 
-## Demo accounts (password in backend .env SEED_PASSWORD, default Demo@12345)
+## Demo accounts (Password: Demo@12345)
 customer@demo.test, trainer1@demo.test, admin@demo.test
