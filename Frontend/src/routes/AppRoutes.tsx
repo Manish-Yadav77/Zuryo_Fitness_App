@@ -8,7 +8,11 @@ import LoginPage from '@/pages/auth/LoginPage';
 import SignupPage from '@/pages/auth/SignupPage';
 import CustomerDashboard from '@/pages/customer/CustomerDashboard';
 import AssessmentPage from '@/pages/customer/AssessmentPage';
+import BookPage from '@/pages/customer/BookPage';
+import MyBookingsPage from '@/pages/customer/MyBookingsPage';
+import BookingDetailPage from '@/pages/customer/BookingDetailPage';
 import TrainerDashboard from '@/pages/trainer/TrainerDashboard';
+import AvailabilityPage from '@/pages/trainer/AvailabilityPage';
 import AdminDashboard from '@/pages/admin/AdminDashboard';
 import PricingPage from '@/pages/admin/PricingPage';
 import NotFoundPage from '@/pages/NotFoundPage';
@@ -32,11 +36,15 @@ export function AppRoutes() {
 
           <Route element={<ProtectedRoute roles={['customer']} />}>
             <Route path="/customer" element={<CustomerDashboard />} />
+            <Route path="/customer/book" element={<BookPage />} />
+            <Route path="/customer/bookings" element={<MyBookingsPage />} />
+            <Route path="/customer/bookings/:id" element={<BookingDetailPage />} />
             <Route path="/customer/assessment" element={<AssessmentPage />} />
           </Route>
 
           <Route element={<ProtectedRoute roles={['trainer']} />}>
             <Route path="/trainer" element={<TrainerDashboard />} />
+            <Route path="/trainer/availability" element={<AvailabilityPage />} />
           </Route>
 
           <Route element={<ProtectedRoute roles={['admin']} />}>

@@ -1,8 +1,8 @@
-import { Schema, model } from 'mongoose';
+import { Schema, model, Types } from 'mongoose';
 
 export interface ICustomerProfile {
   userId: string;
-  societyId: Schema.Types.ObjectId | string;
+  societyId: Types.ObjectId | string;
   flatNumber?: string;
   phone?: string;
 }

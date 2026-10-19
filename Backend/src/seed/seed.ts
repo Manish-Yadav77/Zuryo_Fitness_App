@@ -6,6 +6,7 @@ import type { Role } from '../models/User.js';
 import { Society } from '../models/Society.js';
 import { PricingConfig } from '../models/PricingConfig.js';
 import { PackageTemplate } from '../models/PackageTemplate.js';
+import { TrainerProfile } from '../models/TrainerProfile.js';
 import { DEFAULT_PEAK_WINDOWS } from '../services/pricing.service.js';
 
 interface SeedUser {
@@ -38,20 +39,46 @@ async function seed() {
   const passwordHash = await bcrypt.hash(env.SEED_PASSWORD, 12);
 
   for (const u of SEED_USERS) {
-    await User.updateOne(
+    const userDoc = await User.findOneAndUpdate(
       { email: u.email },
       { $set: { name: u.name, role: u.role, passwordHash, isActive: true } },
-      { upsert: true },
+      { upsert: true, returnDocument: 'after' },
     );
+
+    if (u.role === 'trainer') {
+      await TrainerProfile.updateOne(
+        { userId: userDoc._id.toString() },
+        {
+          $set: {
+            zoneIds: ['zone-bangalore-south', 'zone-bangalore-east'],
+            baseLocation: { lat: 12.9121, lng: 77.6445 },
+            rating: 4.9,
+            bio: `${u.name} is a certified fitness coach offering doorstep workouts.`,
+            isActive: true,
+            weeklyAvailability: [
+              { weekday: 1, start: '06:00', end: '12:00' },
+              { weekday: 1, start: '16:00', end: '20:00' },
+              { weekday: 2, start: '06:00', end: '12:00' },
+              { weekday: 2, start: '16:00', end: '20:00' },
+              { weekday: 3, start: '06:00', end: '12:00' },
+              { weekday: 3, start: '16:00', end: '20:00' },
+              { weekday: 4, start: '06:00', end: '12:00' },
+              { weekday: 4, start: '16:00', end: '20:00' },
+              { weekday: 5, start: '06:00', end: '12:00' },
+              { weekday: 5, start: '16:00', end: '20:00' },
+              { weekday: 6, start: '07:00', end: '12:00' },
+            ],
+            timeOff: [],
+          },
+        },
+        { upsert: true },
+      );
+    }
     console.log(`seeded user: ${u.role.padEnd(8)} ${u.email}`);
   }
 
   for (const s of SEED_SOCIETIES) {
-    await Society.updateOne(
-      { name: s.name },
-      { $set: { ...s, isActive: true } },
-      { upsert: true },
-    );
+    await Society.updateOne({ name: s.name }, { $set: { ...s, isActive: true } }, { upsert: true });
     console.log(`seeded society: ${s.name}`);
   }
 
@@ -69,15 +96,9 @@ async function seed() {
     },
     { upsert: true },
   );
-  console.log('seeded pricing config');
 
   for (const p of SEED_PACKAGES) {
-    await PackageTemplate.updateOne(
-      { name: p.name },
-      { $set: { ...p, isActive: true } },
-      { upsert: true },
-    );
-    console.log(`seeded package template: ${p.name}`);
+    await PackageTemplate.updateOne({ name: p.name }, { $set: { ...p, isActive: true } }, { upsert: true });
   }
 
   await disconnectDb();
