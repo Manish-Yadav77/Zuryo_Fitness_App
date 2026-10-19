@@ -7,6 +7,8 @@ import { Society } from '../models/Society.js';
 import { PricingConfig } from '../models/PricingConfig.js';
 import { PackageTemplate } from '../models/PackageTemplate.js';
 import { TrainerProfile } from '../models/TrainerProfile.js';
+import { CustomerProfile } from '../models/CustomerProfile.js';
+import { FitnessAssessment } from '../models/FitnessAssessment.js';
 import { DEFAULT_PEAK_WINDOWS } from '../services/pricing.service.js';
 
 interface SeedUser {
@@ -17,26 +19,71 @@ interface SeedUser {
 
 const SEED_USERS: SeedUser[] = [
   { name: 'Demo Admin', email: 'admin@demo.test', role: 'admin' },
-  { name: 'Demo Customer', email: 'customer@demo.test', role: 'customer' },
-  { name: 'Aarav Trainer', email: 'trainer1@demo.test', role: 'trainer' },
-  { name: 'Diya Trainer', email: 'trainer2@demo.test', role: 'trainer' },
-  { name: 'Kabir Trainer', email: 'trainer3@demo.test', role: 'trainer' },
+  { name: 'Aarav Sharma', email: 'customer@demo.test', role: 'customer' },
+  { name: 'Priya Verma', email: 'customer2@demo.test', role: 'customer' },
+  { name: 'Vikram Singh', email: 'trainer1@demo.test', role: 'trainer' },
+  { name: 'Ananya Rao', email: 'trainer2@demo.test', role: 'trainer' },
+  { name: 'Kabir Mehta', email: 'trainer3@demo.test', role: 'trainer' },
+  { name: 'Sneha Patel', email: 'trainer4@demo.test', role: 'trainer' },
+  { name: 'Rohan Gupta', email: 'trainer5@demo.test', role: 'trainer' },
 ];
 
 const SEED_SOCIETIES = [
   { name: 'Prestige Ferns Residency', zoneId: 'zone-bangalore-south', address: 'HSR Layout, Bangalore', location: { lat: 12.9121, lng: 77.6445 }, commissionPercent: 10 },
   { name: 'Green Glen Layout', zoneId: 'zone-bangalore-east', address: 'Bellandur, Bangalore', location: { lat: 12.9279, lng: 77.6712 }, commissionPercent: 10 },
   { name: 'Palm Meadows', zoneId: 'zone-bangalore-east', address: 'Whitefield, Bangalore', location: { lat: 12.9698, lng: 77.7499 }, commissionPercent: 10 },
+  { name: 'Sobha Royal Pavilion', zoneId: 'zone-bangalore-south', address: 'Sarjapur Road, Bangalore', location: { lat: 12.9081, lng: 77.6841 }, commissionPercent: 10 },
 ];
 
 const SEED_PACKAGES = [
   { name: 'Starter Pack', sessions: 5, pricePaise: 189500, validityDays: 30, description: '5 sessions (5% discount included)' },
   { name: 'Pro Pack', sessions: 10, pricePaise: 359100, validityDays: 60, description: '10 sessions (10% discount included)' },
+  { name: 'Elite Fitness Pass', sessions: 20, pricePaise: 678300, validityDays: 90, description: '20 sessions (15% discount included)' },
 ];
+
+const TRAINER_DETAILS: Record<string, { rating: number; bio: string; zones: string[]; lat: number; lng: number }> = {
+  'trainer1@demo.test': {
+    rating: 4.9,
+    bio: 'Strength & Conditioning specialist with 6+ years experience in personal training.',
+    zones: ['zone-bangalore-south', 'zone-bangalore-east'],
+    lat: 12.9121,
+    lng: 77.6445,
+  },
+  'trainer2@demo.test': {
+    rating: 4.8,
+    bio: 'Certified Yoga & Functional Fitness instructor focusing on posture and core stability.',
+    zones: ['zone-bangalore-east'],
+    lat: 12.9279,
+    lng: 77.6712,
+  },
+  'trainer3@demo.test': {
+    rating: 5.0,
+    bio: 'High Intensity Interval Training (HIIT) and Fat Loss coach.',
+    zones: ['zone-bangalore-south'],
+    lat: 12.9081,
+    lng: 77.6841,
+  },
+  'trainer4@demo.test': {
+    rating: 4.7,
+    bio: 'Calisthenics and mobility coach specializing in bodyweight strength training.',
+    zones: ['zone-bangalore-east'],
+    lat: 12.9698,
+    lng: 77.7499,
+  },
+  'trainer5@demo.test': {
+    rating: 4.9,
+    bio: 'Boxing & Endurance coach for general cardio fitness and weight loss.',
+    zones: ['zone-bangalore-south', 'zone-bangalore-east'],
+    lat: 12.9150,
+    lng: 77.6500,
+  },
+};
 
 async function seed() {
   await connectDb();
   const passwordHash = await bcrypt.hash(env.SEED_PASSWORD, 12);
+
+  const createdUsers: Record<string, string> = {};
 
   for (const u of SEED_USERS) {
     const userDoc = await User.findOneAndUpdate(
@@ -45,15 +92,18 @@ async function seed() {
       { upsert: true, returnDocument: 'after' },
     );
 
-    if (u.role === 'trainer') {
+    createdUsers[u.email] = userDoc._id.toString();
+
+    if (u.role === 'trainer' && TRAINER_DETAILS[u.email]) {
+      const details = TRAINER_DETAILS[u.email]!;
       await TrainerProfile.updateOne(
         { userId: userDoc._id.toString() },
         {
           $set: {
-            zoneIds: ['zone-bangalore-south', 'zone-bangalore-east'],
-            baseLocation: { lat: 12.9121, lng: 77.6445 },
-            rating: 4.9,
-            bio: `${u.name} is a certified fitness coach offering doorstep workouts.`,
+            zoneIds: details.zones,
+            baseLocation: { lat: details.lat, lng: details.lng },
+            rating: details.rating,
+            bio: details.bio,
             isActive: true,
             weeklyAvailability: [
               { weekday: 1, start: '06:00', end: '12:00' },
@@ -77,9 +127,39 @@ async function seed() {
     console.log(`seeded user: ${u.role.padEnd(8)} ${u.email}`);
   }
 
+  const createdSocieties: Record<string, string> = {};
   for (const s of SEED_SOCIETIES) {
-    await Society.updateOne({ name: s.name }, { $set: { ...s, isActive: true } }, { upsert: true });
+    const soc = await Society.findOneAndUpdate({ name: s.name }, { $set: { ...s, isActive: true } }, { upsert: true, returnDocument: 'after' });
+    createdSocieties[s.name] = soc._id.toString();
     console.log(`seeded society: ${s.name}`);
+  }
+
+  // Seed Customer Profile and Assessment for demo customer
+  const customerId = createdUsers['customer@demo.test'];
+  const prestigeId = createdSocieties['Prestige Ferns Residency'];
+
+  if (customerId && prestigeId) {
+    await CustomerProfile.updateOne(
+      { userId: customerId },
+      { $set: { societyId: prestigeId, flatNumber: 'B-304', phone: '+91 9876543210' } },
+      { upsert: true },
+    );
+
+    await FitnessAssessment.updateOne(
+      { customerId, version: 1 },
+      {
+        $set: {
+          age: 28,
+          weightKg: 72,
+          goals: ['Fat Loss', 'Strength'],
+          level: 'intermediate',
+          preferences: ['Strength Training', 'HIIT'],
+          limitations: 'None',
+        },
+      },
+      { upsert: true },
+    );
+    console.log('seeded customer profile & fitness assessment for customer@demo.test');
   }
 
   await PricingConfig.updateOne(
@@ -102,7 +182,7 @@ async function seed() {
   }
 
   await disconnectDb();
-  console.log('Seed complete');
+  console.log('Seed complete with rich demo data');
 }
 
 seed().catch((err) => {

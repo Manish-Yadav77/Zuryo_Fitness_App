@@ -11,6 +11,7 @@ import AssessmentPage from '@/pages/customer/AssessmentPage';
 import BookPage from '@/pages/customer/BookPage';
 import MyBookingsPage from '@/pages/customer/MyBookingsPage';
 import BookingDetailPage from '@/pages/customer/BookingDetailPage';
+import PackagesPage from '@/pages/customer/PackagesPage';
 import TrainerDashboard from '@/pages/trainer/TrainerDashboard';
 import AvailabilityPage from '@/pages/trainer/AvailabilityPage';
 import AdminDashboard from '@/pages/admin/AdminDashboard';
@@ -39,6 +40,7 @@ export function AppRoutes() {
             <Route path="/customer/book" element={<BookPage />} />
             <Route path="/customer/bookings" element={<MyBookingsPage />} />
             <Route path="/customer/bookings/:id" element={<BookingDetailPage />} />
+            <Route path="/customer/packages" element={<PackagesPage />} />
             <Route path="/customer/assessment" element={<AssessmentPage />} />
           </Route>
 

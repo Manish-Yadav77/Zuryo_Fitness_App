@@ -6,6 +6,7 @@ import { Calendar, Clock, MapPin, Zap } from 'lucide-react';
 import { societyApi } from '@/api/society.api';
 import { pricingApi } from '@/api/pricing.api';
 import { bookingsApi } from '@/api/bookings.api';
+import { paymentsApi } from '@/api/payments.api';
 import { assessmentApi } from '@/api/assessment.api';
 
 import type { Society } from '@/types/society';
@@ -13,19 +14,31 @@ import type { PriceQuote } from '@/types/pricing';
 import type { BookingMode } from '@/types/booking';
 import { parseApiError } from '@/api/client';
 import { formatPaise } from '@/lib/money';
+import { loadRazorpayScript } from '@/lib/razorpay';
+import { env } from '@/config/env';
+import { useAuth } from '@/hooks/useAuth';
 
 import { Alert } from '@/components/ui/Alert';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { PriceBreakdownCard } from '@/components/pricing/PriceBreakdownCard';
 
+function getNextInstantSlot(): string {
+  const now = new Date();
+  // Round up to next 15-minute atom
+  const ms = 1000 * 60 * 15;
+  const rounded = new Date(Math.ceil(now.getTime() / ms) * ms);
+  return rounded.toISOString();
+}
+
 export default function BookPage() {
   const navigate = useNavigate();
+  const { user } = useAuth();
 
   const [societies, setSocieties] = useState<Society[]>([]);
   const [societyId, setSocietyId] = useState('');
   const [mode, setMode] = useState<BookingMode>('INSTANT');
-  const [selectedSlot, setSelectedSlot] = useState('');
+  const [selectedSlot, setSelectedSlot] = useState<string>(getNextInstantSlot());
   const [quote, setQuote] = useState<PriceQuote | null>(null);
 
   const [loading, setLoading] = useState(true);
@@ -51,13 +64,10 @@ export default function BookPage() {
           setSocietyId(socList[0]?._id ?? '');
         }
 
-        const now = new Date();
-        now.setMinutes(now.getMinutes() + 15);
-        now.setSeconds(0, 0);
-        const iso = now.toISOString();
-        setSelectedSlot(iso);
+        const instantIso = getNextInstantSlot();
+        setSelectedSlot(instantIso);
 
-        const q = await pricingApi.getQuote(iso);
+        const q = await pricingApi.getQuote(instantIso);
         setQuote(q);
       } catch (err) {
         setError(parseApiError(err).message);
@@ -67,6 +77,24 @@ export default function BookPage() {
     }
     loadInitial();
   }, []);
+
+  async function handleModeSwitch(newMode: BookingMode) {
+    setMode(newMode);
+    setError(null);
+
+    let slot = selectedSlot;
+    if (newMode === 'INSTANT') {
+      slot = getNextInstantSlot();
+      setSelectedSlot(slot);
+    }
+
+    try {
+      const q = await pricingApi.getQuote(slot);
+      setQuote(q);
+    } catch (err) {
+      setError(parseApiError(err).message);
+    }
+  }
 
   async function handleSlotChange(isoDate: string) {
     setSelectedSlot(isoDate);
@@ -87,9 +115,10 @@ export default function BookPage() {
 
     setError(null);
     setBookingLoading(true);
-    const idempotencyKey = `key-${Date.now()}`;
 
     try {
+      // 1. Create booking doc
+      const idempotencyKey = `key-${Date.now()}`;
       const booking = await bookingsApi.create(
         {
           societyId,
@@ -98,10 +127,59 @@ export default function BookPage() {
         },
         idempotencyKey,
       );
-      navigate(`/customer/bookings/${booking._id}`);
+
+      // 2. Load Razorpay script
+      const loaded = await loadRazorpayScript();
+      if (!loaded || !window.Razorpay) {
+        // Fallback if script fails to load
+        navigate(`/customer/bookings/${booking._id}`);
+        return;
+      }
+
+      // 3. Create Razorpay order from backend
+      const order = await paymentsApi.createOrder(booking._id);
+
+      // 4. Trigger Razorpay Checkout Popup Modal
+      const options = {
+        key: env.razorpayKeyId,
+        amount: order.amountPaise,
+        currency: 'INR',
+        name: 'Zuryo Fit',
+        description: 'Workout Session Payment',
+        order_id: order.orderId,
+        prefill: {
+          name: user?.name,
+          email: user?.email,
+        },
+        theme: { color: '#059669' },
+        handler: async (response: {
+          razorpay_payment_id: string;
+          razorpay_order_id: string;
+          razorpay_signature: string;
+        }) => {
+          try {
+            await paymentsApi.verifyPayment({
+              orderId: response.razorpay_order_id,
+              paymentId: response.razorpay_payment_id,
+              signature: response.razorpay_signature,
+            });
+            navigate(`/customer/bookings/${booking._id}`);
+          } catch (verr) {
+            setError(parseApiError(verr).message);
+          }
+        },
+        modal: {
+          ondismiss: () => {
+            setBookingLoading(false);
+            navigate(`/customer/bookings/${booking._id}`);
+          },
+        },
+      };
+
+      const rzp = new window.Razorpay(options);
+      rzp.open();
     } catch (err) {
       setError(parseApiError(err).message);
-    } finally {
       setBookingLoading(false);
     }
   }
@@ -140,7 +218,7 @@ export default function BookPage() {
           <div className="grid grid-cols-2 gap-3">
             <button
               type="button"
-              onClick={() => setMode('INSTANT')}
+              onClick={() => handleModeSwitch('INSTANT')}
               className={`flex flex-col items-center gap-2 rounded-xl border p-4 text-center transition ${
                 mode === 'INSTANT'
                   ? 'border-emerald-600 bg-emerald-50 text-emerald-700 font-semibold'
@@ -148,11 +226,11 @@ export default function BookPage() {
               }`}
             >
               <Zap className="h-6 w-6 text-emerald-600" />
-              <span>Instant (within 60m)</span>
+              <span>Instant (Within 60m)</span>
             </button>
             <button
               type="button"
-              onClick={() => setMode('SCHEDULED')}
+              onClick={() => handleModeSwitch('SCHEDULED')}
               className={`flex flex-col items-center gap-2 rounded-xl border p-4 text-center transition ${
                 mode === 'SCHEDULED'
                   ? 'border-emerald-600 bg-emerald-50 text-emerald-700 font-semibold'
@@ -165,24 +243,33 @@ export default function BookPage() {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-600">Session Start Time</label>
-            <input
-              type="datetime-local"
-              value={selectedSlot ? new Date(selectedSlot).toISOString().slice(0, 16) : ''}
-              onChange={(e) => {
-                if (e.target.value) {
-                  handleSlotChange(new Date(e.target.value).toISOString());
-                }
-              }}
-              className="block w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
-            />
+            <label className="mb-1.5 block text-xs font-medium text-slate-600">
+              {mode === 'INSTANT' ? 'Auto-Selected Instant Slot' : 'Select Scheduled Time Slot'}
+            </label>
+            {mode === 'INSTANT' ? (
+              <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-3 text-sm font-semibold text-emerald-900">
+                <Clock className="h-4 w-4 text-emerald-600" />
+                <span>{new Date(selectedSlot).toLocaleString()} (Starts within 60 min)</span>
+              </div>
+            ) : (
+              <input
+                type="datetime-local"
+                value={selectedSlot ? new Date(selectedSlot).toISOString().slice(0, 16) : ''}
+                onChange={(e) => {
+                  if (e.target.value) {
+                    handleSlotChange(new Date(e.target.value).toISOString());
+                  }
+                }}
+                className="block w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
+              />
+            )}
           </div>
         </Card>
 
         {quote && <PriceBreakdownCard quote={quote} />}
 
         <Button type="submit" fullWidth loading={bookingLoading}>
-          Confirm Booking ({quote ? formatPaise(quote.totalPaise) : ''})
+          Confirm Booking & Pay ({quote ? formatPaise(quote.totalPaise) : ''})
         </Button>
       </form>
     </div>

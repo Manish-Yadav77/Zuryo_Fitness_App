@@ -1,4 +1,4 @@
-import { Calendar, CalendarClock, ClipboardList, LayoutDashboard, PlusCircle, ReceiptCent as ReceiptPercent } from 'lucide-react';
+import { Calendar, CalendarClock, ClipboardList, LayoutDashboard, PlusCircle, ReceiptCent as ReceiptPercent, Wallet } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import type { Role } from '@/types/auth';
 
@@ -19,6 +19,7 @@ export const navByRole: Record<Role, NavItem[]> = {
     { label: 'Dashboard', to: '/customer', icon: LayoutDashboard },
     { label: 'Book Session', to: '/customer/book', icon: PlusCircle },
     { label: 'My Bookings', to: '/customer/bookings', icon: Calendar },
+    { label: 'Packages', to: '/customer/packages', icon: Wallet },
     { label: 'Fitness Profile', to: '/customer/assessment', icon: ClipboardList },
   ],
   trainer: [

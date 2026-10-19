@@ -15,4 +15,12 @@ export const bookingsApi = {
     const { data } = await api.get<{ booking: Booking }>(`/bookings/${id}`);
     return data.booking;
   },
+  async cancel(id: string, reason?: string): Promise<Booking> {
+    const { data } = await api.post<{ booking: Booking }>(`/bookings/${id}/cancel`, { reason });
+    return data.booking;
+  },
+  async reschedule(id: string, newStartAt: string): Promise<Booking> {
+    const { data } = await api.post<{ booking: Booking }>(`/bookings/${id}/reschedule`, { newStartAt });
+    return data.booking;
+  },
 };
