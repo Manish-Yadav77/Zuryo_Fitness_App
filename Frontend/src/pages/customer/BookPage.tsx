@@ -1,47 +1,49 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Calendar, Clock, MapPin, Zap } from 'lucide-react';
+import { MapPin } from 'lucide-react';
 
 import { societyApi } from '@/api/society.api';
 import { pricingApi } from '@/api/pricing.api';
 import { bookingsApi } from '@/api/bookings.api';
-import { paymentsApi } from '@/api/payments.api';
 import { assessmentApi } from '@/api/assessment.api';
+import { availabilityApi } from '@/api/availability.api';
 
 import type { Society } from '@/types/society';
 import type { PriceQuote } from '@/types/pricing';
 import type { BookingMode } from '@/types/booking';
+import type { CandidateEvaluation, TimeSlotOption } from '@/types/availability';
+
 import { parseApiError } from '@/api/client';
 import { formatPaise } from '@/lib/money';
-import { loadRazorpayScript } from '@/lib/razorpay';
-import { env } from '@/config/env';
-import { useAuth } from '@/hooks/useAuth';
+import { formatIstDateInput } from '@/lib/time';
 
 import { Alert } from '@/components/ui/Alert';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { PriceBreakdownCard } from '@/components/pricing/PriceBreakdownCard';
-
-function getNextInstantSlot(): string {
-  const now = new Date();
-  // Round up to next 15-minute atom
-  const ms = 1000 * 60 * 15;
-  const rounded = new Date(Math.ceil(now.getTime() / ms) * ms);
-  return rounded.toISOString();
-}
+import { ModeSwitch } from '@/components/booking/ModeSwitch';
+import { SlotGrid } from '@/components/booking/SlotGrid';
+import { TrainerPicker } from '@/components/booking/TrainerPicker';
 
 export default function BookPage() {
   const navigate = useNavigate();
-  const { user } = useAuth();
 
   const [societies, setSocieties] = useState<Society[]>([]);
   const [societyId, setSocietyId] = useState('');
   const [mode, setMode] = useState<BookingMode>('INSTANT');
-  const [selectedSlot, setSelectedSlot] = useState<string>(getNextInstantSlot());
+  const [selectedDate, setSelectedDate] = useState(() => formatIstDateInput());
+
+  const [slots, setSlots] = useState<TimeSlotOption[]>([]);
+  const [selectedSlot, setSelectedSlot] = useState('');
+
+  const [candidates, setCandidates] = useState<CandidateEvaluation[]>([]);
+  const [preferredTrainerId, setPreferredTrainerId] = useState('');
+
   const [quote, setQuote] = useState<PriceQuote | null>(null);
 
   const [loading, setLoading] = useState(true);
+  const [loadingSlots, setLoadingSlots] = useState(false);
   const [bookingLoading, setBookingLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -54,21 +56,14 @@ export default function BookPage() {
         ]);
         setSocieties(socList);
 
+        let initialSocietyId = socList[0]?._id ?? '';
         if (myAssessment.profile && myAssessment.profile.societyId) {
-          const sId =
+          initialSocietyId =
             typeof myAssessment.profile.societyId === 'object'
               ? myAssessment.profile.societyId._id
               : myAssessment.profile.societyId;
-          setSocietyId(sId);
-        } else if (socList.length > 0) {
-          setSocietyId(socList[0]?._id ?? '');
         }
-
-        const instantIso = getNextInstantSlot();
-        setSelectedSlot(instantIso);
-
-        const q = await pricingApi.getQuote(instantIso);
-        setQuote(q);
+        setSocietyId(initialSocietyId);
       } catch (err) {
         setError(parseApiError(err).message);
       } finally {
@@ -78,108 +73,83 @@ export default function BookPage() {
     loadInitial();
   }, []);
 
-  async function handleModeSwitch(newMode: BookingMode) {
-    setMode(newMode);
-    setError(null);
+  useEffect(() => {
+    if (!societyId) return;
 
-    let slot = selectedSlot;
-    if (newMode === 'INSTANT') {
-      slot = getNextInstantSlot();
-      setSelectedSlot(slot);
+    async function fetchSlots() {
+      setLoadingSlots(true);
+      setError(null);
+      try {
+        let fetchedSlots: TimeSlotOption[] = [];
+        if (mode === 'INSTANT') {
+          fetchedSlots = await availabilityApi.getInstantOptions(societyId);
+        } else {
+          fetchedSlots = await availabilityApi.getForDate(societyId, selectedDate);
+        }
+        setSlots(fetchedSlots);
+
+        const firstAvailable = fetchedSlots.find((s) => s.availableTrainersCount > 0);
+        if (firstAvailable) {
+          setSelectedSlot(firstAvailable.startAt);
+        } else {
+          setSelectedSlot('');
+          setCandidates([]);
+          setQuote(null);
+        }
+      } catch (err) {
+        setError(parseApiError(err).message);
+      } finally {
+        setLoadingSlots(false);
+      }
     }
 
-    try {
-      const q = await pricingApi.getQuote(slot);
-      setQuote(q);
-    } catch (err) {
-      setError(parseApiError(err).message);
-    }
-  }
+    fetchSlots();
+  }, [societyId, mode, selectedDate]);
 
-  async function handleSlotChange(isoDate: string) {
-    setSelectedSlot(isoDate);
-    try {
-      const q = await pricingApi.getQuote(isoDate);
-      setQuote(q);
-    } catch (err) {
-      setError(parseApiError(err).message);
+  useEffect(() => {
+    if (!societyId || !selectedSlot) return;
+
+    async function fetchSlotDetails() {
+      try {
+        const [q, eligible] = await Promise.all([
+          pricingApi.getQuote(selectedSlot),
+          availabilityApi.getEligibleTrainers(societyId, selectedSlot),
+        ]);
+        setQuote(q);
+        setCandidates(eligible.candidates);
+      } catch (err) {
+        setError(parseApiError(err).message);
+      }
     }
-  }
+
+    fetchSlotDetails();
+  }, [societyId, selectedSlot]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!societyId || !selectedSlot) {
-      setError('Please select a society and time slot');
+      setError('Please select a valid time slot');
       return;
     }
 
     setError(null);
     setBookingLoading(true);
+    const idempotencyKey = `key-${Date.now()}`;
 
     try {
-      // 1. Create booking doc
-      const idempotencyKey = `key-${Date.now()}`;
       const booking = await bookingsApi.create(
         {
           societyId,
           mode,
           startAt: selectedSlot,
+          preferredTrainerId: preferredTrainerId || undefined,
         },
         idempotencyKey,
       );
-
-      // 2. Load Razorpay script
-      const loaded = await loadRazorpayScript();
-      if (!loaded || !window.Razorpay) {
-        setError('Could not load the payment window. Check your internet connection and try again.');
-        setBookingLoading(false);
-        return;
-      }
-
-      // 3. Create Razorpay order from backend
-      const order = await paymentsApi.createOrder(booking._id);
-
-      // 4. Trigger Razorpay Checkout Popup Modal
-      const options = {
-        key: env.razorpayKeyId,
-        amount: order.amountPaise,
-        currency: 'INR',
-        name: 'Zuryo Fit',
-        description: 'Workout Session Payment',
-        order_id: order.orderId,
-        prefill: {
-          name: user?.name,
-          email: user?.email,
-        },
-        theme: { color: '#059669' },
-        handler: async (response: {
-          razorpay_payment_id: string;
-          razorpay_order_id: string;
-          razorpay_signature: string;
-        }) => {
-          try {
-            await paymentsApi.verifyPayment({
-              orderId: response.razorpay_order_id,
-              paymentId: response.razorpay_payment_id,
-              signature: response.razorpay_signature,
-            });
-            navigate(`/customer/bookings/${booking._id}`);
-          } catch (verr) {
-            setError(parseApiError(verr).message);
-          }
-        },
-        modal: {
-          ondismiss: () => {
-            setBookingLoading(false);
-            navigate(`/customer/bookings/${booking._id}`);
-          },
-        },
-      };
-
-      const rzp = new window.Razorpay(options);
-      rzp.open();
+      navigate(`/customer/bookings/${booking._id}`);
     } catch (err) {
       setError(parseApiError(err).message);
+    } finally {
       setBookingLoading(false);
     }
   }
@@ -190,7 +160,7 @@ export default function BookPage() {
     <div className="mx-auto max-w-3xl space-y-6">
       <div>
         <h1 className="text-2xl font-bold text-slate-900">Book a Trainer</h1>
-        <p className="text-sm text-slate-500">Instant or scheduled 60-minute fitness sessions at your doorstep.</p>
+        <p className="text-sm text-slate-500">Select an available time slot and book a 60-minute doorstep workout.</p>
       </div>
 
       {error && <Alert tone="error">{error}</Alert>}
@@ -214,62 +184,47 @@ export default function BookPage() {
         </Card>
 
         <Card className="space-y-4">
-          <h2 className="text-base font-semibold text-slate-900">2. Booking Mode</h2>
-          <div className="grid grid-cols-2 gap-3">
-            <button
-              type="button"
-              onClick={() => handleModeSwitch('INSTANT')}
-              className={`flex flex-col items-center gap-2 rounded-xl border p-4 text-center transition ${
-                mode === 'INSTANT'
-                  ? 'border-emerald-600 bg-emerald-50 text-emerald-700 font-semibold'
-                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-              }`}
-            >
-              <Zap className="h-6 w-6 text-emerald-600" />
-              <span>Instant (Within 60m)</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleModeSwitch('SCHEDULED')}
-              className={`flex flex-col items-center gap-2 rounded-xl border p-4 text-center transition ${
-                mode === 'SCHEDULED'
-                  ? 'border-emerald-600 bg-emerald-50 text-emerald-700 font-semibold'
-                  : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
-              }`}
-            >
-              <Calendar className="h-6 w-6 text-emerald-600" />
-              <span>Scheduled</span>
-            </button>
-          </div>
+          <h2 className="text-base font-semibold text-slate-900">2. Select Booking Mode</h2>
+          <ModeSwitch mode={mode} onChange={setMode} />
 
-          <div>
-            <label className="mb-1.5 block text-xs font-medium text-slate-600">
-              {mode === 'INSTANT' ? 'Auto-Selected Instant Slot' : 'Select Scheduled Time Slot'}
-            </label>
-            {mode === 'INSTANT' ? (
-              <div className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50/60 px-4 py-3 text-sm font-semibold text-emerald-900">
-                <Clock className="h-4 w-4 text-emerald-600" />
-                <span>{new Date(selectedSlot).toLocaleString()} (Starts within 60 min)</span>
-              </div>
-            ) : (
+          {mode === 'SCHEDULED' && (
+            <div className="mt-4">
+              <label className="mb-1.5 block text-xs font-medium text-slate-600">Select Date</label>
               <input
-                type="datetime-local"
-                value={selectedSlot ? new Date(selectedSlot).toISOString().slice(0, 16) : ''}
-                onChange={(e) => {
-                  if (e.target.value) {
-                    handleSlotChange(new Date(e.target.value).toISOString());
-                  }
-                }}
+                type="date"
+                value={selectedDate}
+                min={formatIstDateInput()}
+                onChange={(e) => setSelectedDate(e.target.value)}
                 className="block w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
               />
-            )}
-          </div>
+            </div>
+          )}
         </Card>
+
+        <Card className="space-y-4">
+          <h2 className="text-base font-semibold text-slate-900">3. Choose Available Time Slot</h2>
+          {loadingSlots ? (
+            <div className="py-6 text-center text-xs text-slate-500">Checking slot availability...</div>
+          ) : (
+            <SlotGrid slots={slots} selectedSlot={selectedSlot} onSelectSlot={setSelectedSlot} />
+          )}
+        </Card>
+
+        {selectedSlot && candidates.length > 0 && (
+          <Card className="space-y-4">
+            <h2 className="text-base font-semibold text-slate-900">4. Select Preferred Trainer</h2>
+            <TrainerPicker
+              candidates={candidates}
+              preferredTrainerId={preferredTrainerId}
+              onSelectTrainer={setPreferredTrainerId}
+            />
+          </Card>
+        )}
 
         {quote && <PriceBreakdownCard quote={quote} />}
 
-        <Button type="submit" fullWidth loading={bookingLoading}>
-          Confirm Booking & Pay ({quote ? formatPaise(quote.totalPaise) : ''})
+        <Button type="submit" fullWidth disabled={!selectedSlot} loading={bookingLoading}>
+          Confirm Booking ({quote ? formatPaise(quote.totalPaise) : ''})
         </Button>
       </form>
     </div>

@@ -19,7 +19,6 @@ export interface CreateBookingInput {
   idempotencyKey?: string;
 }
 
-// NOTE: rewritten in Phase 13 (payment hold, package mode, stronger idempotency).
 export async function createBooking(input: CreateBookingInput) {
   if (input.idempotencyKey) {
     const existing = await Booking.findOne({
@@ -30,6 +29,16 @@ export async function createBooking(input: CreateBookingInput) {
   }
 
   const now = new Date();
+  const minLead = new Date(now.getTime() + 10 * 60 * 1000);
+  const maxHorizon = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+  if (input.startAt < minLead) {
+    throw new AppError(400, 'SLOT_IN_PAST', 'Bookings must be scheduled at least 10 minutes in advance');
+  }
+  if (input.startAt > maxHorizon) {
+    throw new AppError(400, 'SLOT_TOO_FAR', 'Bookings cannot be scheduled more than 30 days in advance');
+  }
+
   if (input.mode === 'INSTANT') {
     const maxInstantTime = new Date(now.getTime() + 60 * 60 * 1000);
     if (input.startAt > maxInstantTime) {
@@ -39,6 +48,16 @@ export async function createBooking(input: CreateBookingInput) {
 
   const roundedStart = ceilToAtom(input.startAt);
   const roundedEnd = new Date(roundedStart.getTime() + 60 * 60 * 1000);
+
+  const customerOverlap = await Booking.exists({
+    customerId: input.customerId,
+    status: { $in: ['PENDING_PAYMENT', 'CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS'] },
+    startAt: { $lt: roundedEnd },
+    endAt: { $gt: roundedStart },
+  });
+  if (customerOverlap) {
+    throw new AppError(409, 'CUSTOMER_OVERLAP', 'You already have another active booking overlapping this time slot');
+  }
 
   const quote = await calculateQuoteForDate(roundedStart);
   const selection = await findBestTrainerForSlot(input.societyId, roundedStart, input.preferredTrainerId);

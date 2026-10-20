@@ -41,7 +41,7 @@ const SEED_PACKAGES = [
   { name: 'Elite Fitness Pass', sessions: 20, pricePaise: 678300, validityDays: 90, description: '20 sessions (15% discount included)' },
 ];
 
-const TRAINER_DETAILS: Record<string, { rating: number; bio: string; zones: string[]; lat: number; lng: number }> = {
+const TRAINER_DETAILS: Record<string, { rating: number; bio: string; zones: string[]; lat: number; lng: number; isAllDay?: boolean }> = {
   'trainer1@demo.test': {
     rating: 4.9,
     bio: 'Strength & Conditioning specialist with 6+ years experience in personal training.',
@@ -72,10 +72,11 @@ const TRAINER_DETAILS: Record<string, { rating: number; bio: string; zones: stri
   },
   'trainer5@demo.test': {
     rating: 4.9,
-    bio: 'Boxing & Endurance coach for general cardio fitness and weight loss.',
+    bio: 'All-day Boxing & Endurance coach available round-the-clock for instant bookings.',
     zones: ['zone-bangalore-south', 'zone-bangalore-east'],
-    lat: 12.915,
-    lng: 77.65,
+    lat: 12.9150,
+    lng: 77.6500,
+    isAllDay: true,
   },
 };
 
@@ -94,8 +95,24 @@ async function seed() {
 
     createdUsers[u.email] = userDoc._id.toString();
 
-    const details = TRAINER_DETAILS[u.email];
-    if (u.role === 'trainer' && details) {
+    if (u.role === 'trainer' && TRAINER_DETAILS[u.email]) {
+      const details = TRAINER_DETAILS[u.email]!;
+      const weeklyAvailability = details.isAllDay
+        ? [0, 1, 2, 3, 4, 5, 6].map((w) => ({ weekday: w, start: '00:00', end: '23:59' }))
+        : [
+            { weekday: 1, start: '06:00', end: '12:00' },
+            { weekday: 1, start: '16:00', end: '20:00' },
+            { weekday: 2, start: '06:00', end: '12:00' },
+            { weekday: 2, start: '16:00', end: '20:00' },
+            { weekday: 3, start: '06:00', end: '12:00' },
+            { weekday: 3, start: '16:00', end: '20:00' },
+            { weekday: 4, start: '06:00', end: '12:00' },
+            { weekday: 4, start: '16:00', end: '20:00' },
+            { weekday: 5, start: '06:00', end: '12:00' },
+            { weekday: 5, start: '16:00', end: '20:00' },
+            { weekday: 6, start: '07:00', end: '12:00' },
+          ];
+
       await TrainerProfile.updateOne(
         { userId: userDoc._id.toString() },
         {
@@ -105,19 +122,7 @@ async function seed() {
             rating: details.rating,
             bio: details.bio,
             isActive: true,
-            weeklyAvailability: [
-              { weekday: 1, start: '06:00', end: '12:00' },
-              { weekday: 1, start: '16:00', end: '20:00' },
-              { weekday: 2, start: '06:00', end: '12:00' },
-              { weekday: 2, start: '16:00', end: '20:00' },
-              { weekday: 3, start: '06:00', end: '12:00' },
-              { weekday: 3, start: '16:00', end: '20:00' },
-              { weekday: 4, start: '06:00', end: '12:00' },
-              { weekday: 4, start: '16:00', end: '20:00' },
-              { weekday: 5, start: '06:00', end: '12:00' },
-              { weekday: 5, start: '16:00', end: '20:00' },
-              { weekday: 6, start: '07:00', end: '12:00' },
-            ],
+            weeklyAvailability,
             timeOff: [],
           },
         },
@@ -129,11 +134,7 @@ async function seed() {
 
   const createdSocieties: Record<string, string> = {};
   for (const s of SEED_SOCIETIES) {
-    const soc = await Society.findOneAndUpdate(
-      { name: s.name },
-      { $set: { ...s, isActive: true } },
-      { upsert: true, returnDocument: 'after' },
-    );
+    const soc = await Society.findOneAndUpdate({ name: s.name }, { $set: { ...s, isActive: true } }, { upsert: true, returnDocument: 'after' });
     createdSocieties[s.name] = soc._id.toString();
     console.log(`seeded society: ${s.name}`);
   }
@@ -165,8 +166,7 @@ async function seed() {
     console.log('seeded customer profile & fitness assessment for customer@demo.test');
   }
 
-  // Pricing is created ONLY if it does not exist yet, so re-seeding never overwrites admin edits.
-  const pricingResult = await PricingConfig.updateOne(
+  await PricingConfig.updateOne(
     { _id: 'default' },
     {
       $setOnInsert: {
@@ -180,7 +180,6 @@ async function seed() {
     },
     { upsert: true },
   );
-  console.log(pricingResult.upsertedCount ? 'seeded pricing config' : 'pricing config already exists (kept as is)');
 
   for (const p of SEED_PACKAGES) {
     await PackageTemplate.updateOne({ name: p.name }, { $set: { ...p, isActive: true } }, { upsert: true });

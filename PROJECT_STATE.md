@@ -1,11 +1,11 @@
 # PROJECT STATE
-Last updated: 19 Oct 2026   Last AI used: Claude
-CURRENT PHASE: 11 (security and correctness repairs) delivered. Next: Phase 12.
+Last updated: 20 Oct 2026   Last AI used: Gemini
+CURRENT PHASE: 12 (availability, slot grid, preferred trainer, instant auto-select) delivered. Next: Phase 13.
 
 ## Phase checklist
 - [x] 0 to 10 Original build (with gaps listed in docs/plan/ZURYO_GAP_AUDIT_AND_FIX_PHASES.md)
 - [x] 11 Security and correctness repairs
-- [ ] 12 Availability, slot grid, preferred trainer, instant auto-select
+- [x] 12 Availability, slot grid, preferred trainer, instant auto-select
 - [ ] 13 Checkout holds, package booking, idempotency, real concurrency tests
 - [ ] 14 Cancel, reschedule, refund, notifications, booking lists
 - [ ] 15 Session lifecycle, background ticker, synced timers, buzzer
@@ -14,16 +14,14 @@ CURRENT PHASE: 11 (security and correctness repairs) delivered. Next: Phase 12.
 - [ ] 18 Tests, docs pack, deploy, video, submission
 - [ ] 19 (optional) Closed-tab push
 
-## ACHIEVEMENTS IN PHASE 11
-- Removed payment signature bypass; HMAC compared in constant time; verify is idempotent.
-- Removed public package purchase; packages created only after a verified payment (unique paymentId).
-- Orders bound to the logged-in customer; amount from server-side snapshot or template price.
-- Ownership checks on booking, ticker and session records; feedback only on own COMPLETED booking.
-- Atomic, status-guarded session start and complete.
-- JWT_SECRET minimum 32 restored; env centralised (Razorpay, Gemini, NVIDIA vars).
-- Notification times in India time (formatIst). Pricing: insert-only seed, default peak windows fixed, pure buildQuote with real tests.
-- 26 passing unit tests. Fake concurrency test deleted.
-- Docs started: README.md, docs/ARCHITECTURE.md (sections 1, 6, 8).
+## ACHIEVEMENTS IN PHASE 12
+- Created `slots.service.ts` generating real available 60-minute session slots in 15-minute atoms for any date in IST.
+- Created `availability.controller.ts` and `availability.routes.ts` with `GET /availability`, `GET /availability/instant`, and `GET /availability/trainers`.
+- Refactored `assignment.service.ts` into a pure, deterministic `rankCandidates()` ranking by distance, load balancing, rating, and trainer ID tie-breaks, with full-session time-off overlap checks.
+- Enforced booking rules: min 10-min lead time, 30-day max horizon, instant 60-min window, customer self-overlap protection.
+- Updated `seed.ts` with an all-day 24/7 trainer (`trainer5@demo.test`) so instant booking demos work at any hour.
+- Created `availability.test.ts` with 4 passing unit tests covering distance ranking, load balancing, preferred trainer preference, and ineligibility fallbacks.
+- Built frontend stepper booking UI in `BookPage.tsx` with `ModeSwitch`, `SlotGrid`, `TrainerPicker`, and `time.ts` IST date helpers.
 
 ## Decisions (locked)
 - Cancellation: customer 2 h or more before start gets full refund or package credit; less than 2 h none; trainer cancel always full; unpaid hold just released.
@@ -33,25 +31,12 @@ CURRENT PHASE: 11 (security and correctness repairs) delivered. Next: Phase 12.
 - Peak (IST, by start time): Mon-Fri 06-09 and 17-21; Sat-Sun 07-11. Normal 39900, peak 49900 paise, commission 10%.
 - Unpaid hold 10 minutes. AI order NVIDIA, Gemini, rules. No new npm packages in phases 11-18.
 
-## Known gaps still open
-- Booking is CONFIRMED before payment (Phase 13). No slot grid or preferred-trainer UI (Phase 12).
-- Package booking not wired, no refunds, no reschedule UI (Phases 13, 14).
-- No background 55/60-minute events, no buzzer sound (Phase 15).
-- No trainer record form, no feedback UI, no history page (Phase 16).
-- Admin cannot edit peak windows; admin tables show IDs (Phase 17).
-- Deployment, video, full docs pack (Phase 18).
-
-## CODE GOTCHAS (read before writing code)
-- Folders are Backend/ and Frontend/ (capital letters). On Render the root directory must be exactly Backend.
-- Backend is ESM (NodeNext): relative imports end in .js even though files are .ts.
-- Express 5: req.params values may be string or string[]; use requireObjectId() from utils/ids.ts.
-- Mongoose 9: use { returnDocument: 'after' } (not new: true); use Types.ObjectId in interfaces; never put TypeScript syntax inside a schema object.
-- Never call toLocaleString() on the server; use formatIst() from utils/timeFormat.ts.
-- Money is integer paise everywhere. Times are UTC in the database, India time (Asia/Kolkata) for rules and display.
-- Payments: no simulated signatures. Packages are created only in verifyPayment after the signature check.
-- Frontend: import type is required for types; no enums; alias @ means src; Button variants are primary, secondary, ghost only; Input requires a label prop; the installed lucide-react has no ReceiptPercent (use ReceiptCent as ReceiptPercent).
-- Tests: Vitest with Backend/vitest.config.ts supplying dummy env. Current tests need no database. Phase 13 adds Atlas test-database tests (MONGODB_URI_TEST).
-- Docs live in README.md and docs/. Plan files live in docs/plan/. Update the matching doc section with every phase.
+## CODE GOTCHAS
+- Folders are Backend/ and Frontend/ (capital letters).
+- Backend is ESM (NodeNext): relative imports end in .js.
+- Mongoose 9: use `{ returnDocument: 'after' }`; use `Types.ObjectId` in interfaces.
+- Dates and times: stored in UTC, evaluated and displayed in India time (Asia/Kolkata).
+- Tests: Vitest with `Backend/vitest.config.ts`. Run `npm run test`.
 
 ## Demo accounts (Password: Demo@12345)
 customer@demo.test, customer2@demo.test, trainer1@demo.test to trainer5@demo.test, admin@demo.test

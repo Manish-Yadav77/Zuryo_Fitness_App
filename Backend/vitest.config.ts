@@ -2,7 +2,8 @@ import { defineConfig } from 'vitest/config';
 
 export default defineConfig({
   test: {
-    // Safe dummy values so tests never need your real .env or a database.
+    include: ['src/**/*.test.ts'],
+    exclude: ['dist/**', 'node_modules/**'],
     env: {
       NODE_ENV: 'test',
       MONGODB_URI: 'mongodb://127.0.0.1:27017/zuryo_unit_tests',
