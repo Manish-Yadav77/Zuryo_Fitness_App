@@ -1,9 +1,7 @@
-export type PricingTier = 'NORMAL' | 'PEAK';
-
 export interface PeakWindow {
   weekdays: number[];
-  start: string;
-  end: string;
+  startMinute: number;
+  endMinute: number;
 }
 
 export interface PricingConfig {
@@ -17,11 +15,10 @@ export interface PricingConfig {
 }
 
 export interface PriceQuote {
-  tier: PricingTier;
+  tier: 'NORMAL' | 'PEAK';
   sessionPaise: number;
   commissionPaise: number;
   totalPaise: number;
   commissionPercent: number;
   configVersion: number;
-  startAt: string;
 }

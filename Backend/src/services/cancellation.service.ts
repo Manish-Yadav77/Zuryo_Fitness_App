@@ -7,9 +7,11 @@ import { sendNotification } from './notification.service.js';
 import { findBestTrainerForSlot } from './assignment.service.js';
 import { ceilToAtom, getSessionAtoms } from './time.js';
 import { AppError } from '../utils/AppError.js';
+import { formatIst } from '../utils/timeFormat.js';
 
 const CANCELLATION_WINDOW_HOURS = 2;
 
+// NOTE: both functions are rewritten in Phase 14 (refunds, own-lock fix, rules).
 export async function cancelBooking(bookingId: string, userId: string, reason?: string) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -26,7 +28,6 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
       throw new AppError(400, 'INVALID_STATUS', `Cannot cancel a ${booking.status.toLowerCase()} booking`);
     }
 
-    // Check 2-hour window rule for customer cancellations
     const now = new Date();
     const hoursUntilStart = (booking.startAt.getTime() - now.getTime()) / (1000 * 60 * 60);
 
@@ -37,7 +38,6 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
       }
     }
 
-    // Restore package credit if applicable
     if (restoreCredit && booking.packageId) {
       await PackageLedger.create(
         [
@@ -51,14 +51,9 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
         { session },
       );
 
-      await CustomerPackage.findByIdAndUpdate(
-        booking.packageId,
-        { $inc: { usedSessions: -1 } },
-        { session },
-      );
+      await CustomerPackage.findByIdAndUpdate(booking.packageId, { $inc: { usedSessions: -1 } }, { session });
     }
 
-    // Release slot locks
     await SlotLock.deleteMany({ bookingId: booking._id }, { session });
 
     booking.status = 'CANCELLED';
@@ -69,18 +64,17 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
     await session.commitTransaction();
     session.endSession();
 
-    // Notify trainer and customer
     await sendNotification(
       booking.trainerId,
       'BOOKING_CANCELLED',
-      `Booking for ${booking.startAt.toLocaleString()} was cancelled.`,
+      `Booking for ${formatIst(booking.startAt)} was cancelled.`,
       booking._id.toString(),
     );
 
     await sendNotification(
       booking.customerId,
       'BOOKING_CANCELLED',
-      `Your booking for ${booking.startAt.toLocaleString()} has been cancelled.${restoreCredit ? ' 1 package session restored.' : ''}`,
+      `Your booking for ${formatIst(booking.startAt)} has been cancelled.${restoreCredit ? ' 1 package session restored.' : ''}`,
       booking._id.toString(),
     );
 
@@ -121,10 +115,8 @@ export async function rescheduleBooking(bookingId: string, customerId: string, n
   session.startTransaction();
 
   try {
-    // Delete old locks
     await SlotLock.deleteMany({ bookingId: booking._id }, { session });
 
-    // Create new locks
     const newAtoms = getSessionAtoms(roundedStart);
     const locks = newAtoms.map((atom) => ({
       trainerId: selection.chosenTrainerId!,
@@ -147,7 +139,7 @@ export async function rescheduleBooking(bookingId: string, customerId: string, n
     await sendNotification(
       booking.trainerId,
       'BOOKING_RESCHEDULED',
-      `Session rescheduled to ${roundedStart.toLocaleString()}`,
+      `Session rescheduled to ${formatIst(roundedStart)}.`,
       booking._id.toString(),
     );
 

@@ -1,120 +1,102 @@
-import { useEffect, useState } from 'react';
-import { Check, ShieldCheck, Zap } from 'lucide-react';
-import { packagesApi } from '@/api/packages.api';
-import { paymentsApi } from '@/api/payments.api';
-import type { CustomerPackage, PackageTemplate } from '@/types/package';
-import { parseApiError } from '@/api/client';
-import { formatPaise } from '@/lib/money';
-import { loadRazorpayScript } from '@/lib/razorpay';
-import { env } from '@/config/env';
-import { useAuth } from '@/hooks/useAuth';
+import { useEffect, useState } from 'react'
+import { Check, ShieldCheck, Zap } from 'lucide-react'
+import { packagesApi } from '@/api/packages.api'
+import { paymentsApi } from '@/api/payments.api'
+import type { CustomerPackage, PackageTemplate } from '@/types/package'
+import type { RazorpaySuccessResponse } from '@/types/payment'
+import { parseApiError } from '@/api/client'
+import { formatPaise } from '@/lib/money'
+import { loadRazorpayScript } from '@/lib/razorpay'
+import { env } from '@/config/env'
+import { useAuth } from '@/hooks/useAuth'
 
-import { Alert } from '@/components/ui/Alert';
-import { Badge } from '@/components/ui/Badge';
-import { Button } from '@/components/ui/Button';
-import { Card } from '@/components/ui/Card';
+import { Alert } from '@/components/ui/Alert'
+import { Badge } from '@/components/ui/Badge'
+import { Button } from '@/components/ui/Button'
+import { Card } from '@/components/ui/Card'
 
 export default function PackagesPage() {
-  const { user } = useAuth();
-  const [templates, setTemplates] = useState<PackageTemplate[]>([]);
-  const [myPackages, setMyPackages] = useState<CustomerPackage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [purchasingId, setPurchasingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [success, setSuccess] = useState<string | null>(null);
+  const { user } = useAuth()
+  const [templates, setTemplates] = useState<PackageTemplate[]>([])
+  const [myPackages, setMyPackages] = useState<CustomerPackage[]>([])
+  const [loading, setLoading] = useState(true)
+  const [purchasingId, setPurchasingId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState<string | null>(null)
 
   useEffect(() => {
     async function load() {
       try {
-        const [tplList, pkgList] = await Promise.all([
-          packagesApi.getTemplates(),
-          packagesApi.getMine(),
-        ]);
-        setTemplates(tplList);
-        setMyPackages(pkgList);
+        const [tplList, pkgList] = await Promise.all([packagesApi.getTemplates(), packagesApi.getMine()])
+        setTemplates(tplList)
+        setMyPackages(pkgList)
       } catch (err) {
-        setError(parseApiError(err).message);
+        setError(parseApiError(err).message)
       } finally {
-        setLoading(false);
+        setLoading(false)
       }
     }
-    load();
-  }, []);
+    load()
+  }, [])
 
   async function handleBuyPackage(tpl: PackageTemplate) {
-    setError(null);
-    setSuccess(null);
-    setPurchasingId(tpl._id);
+    setError(null)
+    setSuccess(null)
+    setPurchasingId(tpl._id)
 
     try {
-      // 1. Create payment order
-      const order = await paymentsApi.createOrder(undefined, tpl._id);
+      // 1. The server creates the Razorpay order (the price comes from the server, not from here)
+      const order = await paymentsApi.createOrder(undefined, tpl._id)
 
-      // 2. Load Razorpay script
-      const loaded = await loadRazorpayScript();
+      // 2. Load the Razorpay checkout script. If it cannot load we stop: there is no fake payment path.
+      const loaded = await loadRazorpayScript()
       if (!loaded || !window.Razorpay) {
-        // Fallback for offline testing
-        await paymentsApi.verifyPayment({
-          orderId: order.orderId,
-          paymentId: `pay_test_${Date.now()}`,
-          signature: 'simulated_test_signature',
-        });
-        const newPkg = await packagesApi.purchase(tpl._id, order.paymentId);
-        setMyPackages((prev) => [newPkg, ...prev]);
-        setSuccess(`Successfully purchased ${tpl.name}! ${tpl.sessions} sessions added.`);
-        setPurchasingId(null);
-        return;
+        setError('Could not load the payment window. Check your internet connection and try again.')
+        setPurchasingId(null)
+        return
       }
 
-      // 3. Open Razorpay Checkout Popup Modal
-      const options = {
+      // 3. Open the Razorpay test checkout
+      const rzp = new window.Razorpay({
         key: env.razorpayKeyId,
         amount: order.amountPaise,
         currency: 'INR',
         name: 'Zuryo Fit',
         description: `Purchase ${tpl.name}`,
         order_id: order.orderId,
-        prefill: {
-          name: user?.name,
-          email: user?.email,
-        },
+        prefill: { name: user?.name, email: user?.email },
         theme: { color: '#059669' },
-        handler: async (response: {
-          razorpay_payment_id: string;
-          razorpay_order_id: string;
-          razorpay_signature: string;
-        }) => {
+        handler: async (response: RazorpaySuccessResponse) => {
           try {
-            await paymentsApi.verifyPayment({
+            // 4. The server verifies the signature and creates the package itself
+            const result = await paymentsApi.verifyPayment({
               orderId: response.razorpay_order_id,
               paymentId: response.razorpay_payment_id,
               signature: response.razorpay_signature,
-            });
-            const newPkg = await packagesApi.purchase(tpl._id, order.paymentId);
-            setMyPackages((prev) => [newPkg, ...prev]);
-            setSuccess(`Successfully purchased ${tpl.name}! ${tpl.sessions} sessions added.`);
+            })
+            if (result.package) {
+              const created = result.package
+              setMyPackages((prev) => [created, ...prev.filter((p) => p._id !== created._id)])
+              setSuccess(`Successfully purchased ${tpl.name}! ${tpl.sessions} sessions added.`)
+            }
           } catch (verr) {
-            setError(parseApiError(verr).message);
+            setError(parseApiError(verr).message)
           } finally {
-            setPurchasingId(null);
+            setPurchasingId(null)
           }
         },
         modal: {
-          ondismiss: () => {
-            setPurchasingId(null);
-          },
+          ondismiss: () => setPurchasingId(null),
         },
-      };
-
-      const rzp = new window.Razorpay(options);
-      rzp.open();
+      })
+      rzp.open()
     } catch (err) {
-      setError(parseApiError(err).message);
-      setPurchasingId(null);
+      setError(parseApiError(err).message)
+      setPurchasingId(null)
     }
   }
 
-  if (loading) return <div className="py-10 text-center text-slate-500">Loading workout packages...</div>;
+  if (loading) return <div className="py-10 text-center text-slate-500">Loading workout packages...</div>
 
   return (
     <div className="mx-auto max-w-4xl space-y-6">
@@ -133,7 +115,7 @@ export default function PackagesPage() {
         ) : (
           <div className="mt-4 grid gap-4 sm:grid-cols-2">
             {myPackages.map((p) => {
-              const remaining = p.totalSessions - p.usedSessions;
+              const remaining = p.totalSessions - p.usedSessions
               return (
                 <div key={p._id} className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-4">
                   <div className="flex items-center justify-between">
@@ -143,11 +125,9 @@ export default function PackagesPage() {
                   <p className="mt-2 text-xs text-slate-600">
                     Used {p.usedSessions} of {p.totalSessions} sessions
                   </p>
-                  <p className="mt-1 text-xs text-slate-500">
-                    Expires on {new Date(p.expiresAt).toLocaleDateString()}
-                  </p>
+                  <p className="mt-1 text-xs text-slate-500">Expires on {new Date(p.expiresAt).toLocaleDateString()}</p>
                 </div>
-              );
+              )
             })}
           </div>
         )}
@@ -181,11 +161,7 @@ export default function PackagesPage() {
                 </ul>
               </div>
 
-              <Button
-                className="mt-6"
-                loading={purchasingId === tpl._id}
-                onClick={() => handleBuyPackage(tpl)}
-              >
+              <Button className="mt-6" loading={purchasingId === tpl._id} onClick={() => handleBuyPackage(tpl)}>
                 Buy Now
               </Button>
             </Card>
@@ -193,5 +169,5 @@ export default function PackagesPage() {
         </div>
       </div>
     </div>
-  );
+  )
 }

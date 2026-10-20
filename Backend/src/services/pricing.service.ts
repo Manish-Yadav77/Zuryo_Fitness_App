@@ -1,26 +1,48 @@
 import { PricingConfig } from '../models/PricingConfig.js';
+import type { PeakWindow } from '../models/PricingConfig.js';
 import { isPeakSlot } from './peak.js';
-import { AppError } from '../utils/AppError.js';
 
-export type PricingTier = 'NORMAL' | 'PEAK';
+// Weekdays 06:00-09:00 and 17:00-21:00, weekends 07:00-11:00 (India time). Minutes since midnight.
+export const DEFAULT_PEAK_WINDOWS: PeakWindow[] = [
+  { weekdays: [1, 2, 3, 4, 5], startMinute: 360, endMinute: 540 },
+  { weekdays: [1, 2, 3, 4, 5], startMinute: 1020, endMinute: 1260 },
+  { weekdays: [0, 6], startMinute: 420, endMinute: 660 },
+];
 
-export interface PriceQuote {
-  tier: PricingTier;
+export interface PricingRules {
+  normalPaise: number;
+  peakPaise: number;
+  commissionPercent: number;
+  peakWindows: PeakWindow[];
+  version: number;
+}
+
+export interface Quote {
+  tier: 'NORMAL' | 'PEAK';
   sessionPaise: number;
   commissionPaise: number;
   totalPaise: number;
   commissionPercent: number;
   configVersion: number;
-  startAt: string;
 }
 
-export const DEFAULT_PEAK_WINDOWS = [
-  { weekdays: [1, 2, 3, 4, 5], start: '06:00', end: '09:00' }, // Mon-Fri morning
-  { weekdays: [1, 2, 3, 4, 5], start: '17:00', end: '21:00' }, // Mon-Fri evening
-  { weekdays: [0, 6], start: '07:00', end: '11:00' }, // Weekend morning
-];
+/** Pure function (no database). Money is integer paise; commission uses basis points to avoid float errors. */
+export function buildQuote(rules: PricingRules, slotStart: Date): Quote {
+  const peak = isPeakSlot(slotStart, rules.peakWindows);
+  const sessionPaise = peak ? rules.peakPaise : rules.normalPaise;
+  const basisPoints = Math.round(rules.commissionPercent * 100);
+  const commissionPaise = Math.round((sessionPaise * basisPoints) / 10000);
+  return {
+    tier: peak ? 'PEAK' : 'NORMAL',
+    sessionPaise,
+    commissionPaise,
+    totalPaise: sessionPaise + commissionPaise,
+    commissionPercent: rules.commissionPercent,
+    configVersion: rules.version,
+  };
+}
 
-export async function getActivePricingConfig() {
+export async function getPricingConfig() {
   let config = await PricingConfig.findById('default');
   if (!config) {
     config = await PricingConfig.create({
@@ -36,26 +58,34 @@ export async function getActivePricingConfig() {
   return config;
 }
 
-export async function calculateQuoteForDate(startAt: Date): Promise<PriceQuote> {
-  if (isNaN(startAt.getTime())) {
-    throw new AppError(400, 'INVALID_DATE', 'Please provide a valid ISO start time');
-  }
+export async function updatePricingConfig(data: {
+  normalPaise: number;
+  peakPaise: number;
+  commissionPercent: number;
+}) {
+  const current = await getPricingConfig();
+  current.normalPaise = data.normalPaise;
+  current.peakPaise = data.peakPaise;
+  current.commissionPercent = data.commissionPercent;
+  current.version += 1;
+  await current.save();
+  return current;
+}
 
-  const config = await getActivePricingConfig();
-  const isPeak = isPeakSlot(startAt, config.peakWindows);
-
-  const tier: PricingTier = isPeak ? 'PEAK' : 'NORMAL';
-  const sessionPaise = isPeak ? config.peakPaise : config.normalPaise;
-  const commissionPaise = Math.round((sessionPaise * config.commissionPercent) / 100);
-  const totalPaise = sessionPaise + commissionPaise;
-
-  return {
-    tier,
-    sessionPaise,
-    commissionPaise,
-    totalPaise,
-    commissionPercent: config.commissionPercent,
-    configVersion: config.version,
-    startAt: startAt.toISOString(),
-  };
+export async function calculateQuoteForDate(slotStart: Date): Promise<Quote> {
+  const config = await getPricingConfig();
+  return buildQuote(
+    {
+      normalPaise: config.normalPaise,
+      peakPaise: config.peakPaise,
+      commissionPercent: config.commissionPercent,
+      peakWindows: config.peakWindows.map((w) => ({
+        weekdays: [...w.weekdays],
+        startMinute: w.startMinute,
+        endMinute: w.endMinute,
+      })),
+      version: config.version,
+    },
+    slotStart,
+  );
 }

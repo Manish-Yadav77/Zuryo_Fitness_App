@@ -1,20 +1,14 @@
-import { api } from './client';
-import type { CustomerPackage, PackageTemplate } from '@/types/package';
+import { api } from './client'
+import type { CustomerPackage, PackageTemplate } from '@/types/package'
 
+// Packages are created by the server after a verified payment (POST /payments/verify), never by the browser.
 export const packagesApi = {
   async getTemplates(): Promise<PackageTemplate[]> {
-    const { data } = await api.get<{ templates: PackageTemplate[] }>('/packages/templates');
-    return data.templates;
+    const { data } = await api.get<{ templates: PackageTemplate[] }>('/packages/templates')
+    return data.templates
   },
   async getMine(): Promise<CustomerPackage[]> {
-    const { data } = await api.get<{ packages: CustomerPackage[] }>('/packages/mine');
-    return data.packages;
+    const { data } = await api.get<{ packages: CustomerPackage[] }>('/packages/mine')
+    return data.packages
   },
-  async purchase(templateId: string, paymentId?: string): Promise<CustomerPackage> {
-    const { data } = await api.post<{ package: CustomerPackage }>('/packages/purchase', {
-      templateId,
-      paymentId,
-    });
-    return data.package;
-  },
-};
+}

@@ -1,24 +1,41 @@
 import { Booking } from '../models/Booking.js';
+import type { AuthUser } from '../middleware/auth.js';
 import { sendNotification } from './notification.service.js';
 import { AppError } from '../utils/AppError.js';
+import { assertCanViewBooking } from '../utils/ownership.js';
 
-export async function startSession(bookingId: string, trainerId: string) {
+const SESSION_MS = 60 * 60 * 1000; // fixed 60 minutes
+const WARN_MS = 55 * 60 * 1000; // warning at 55 minutes
+
+async function explainFailure(bookingId: string, trainerId: string, action: string): Promise<AppError> {
   const booking = await Booking.findById(bookingId);
-  if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
-  if (booking.trainerId !== trainerId) throw new AppError(403, 'FORBIDDEN', 'Not assigned to this session');
+  if (!booking) return new AppError(404, 'NOT_FOUND', 'Booking not found');
+  if (booking.trainerId !== trainerId) return new AppError(403, 'FORBIDDEN', 'Not assigned to this session');
+  return new AppError(
+    409,
+    'INVALID_STATUS',
+    `Cannot ${action} a session that is ${booking.status.toLowerCase().replace('_', ' ')}`,
+  );
+}
 
+/** Starts the session once. The database decides the start time, never the browser. */
+export async function startSession(bookingId: string, trainerId: string) {
   const now = new Date();
-  const endsAt = new Date(now.getTime() + 60 * 60 * 1000); // Fixed 60 minutes
-  const warnAt = new Date(now.getTime() + 55 * 60 * 1000); // 55-minute warning buzzer
 
-  booking.status = 'IN_PROGRESS';
-  booking.session = {
-    startedAt: now,
-    warnAt,
-    endsAt,
-  };
+  const booking = await Booking.findOneAndUpdate(
+    { _id: bookingId, trainerId, status: { $in: ['CONFIRMED', 'ON_THE_WAY'] } },
+    {
+      $set: {
+        status: 'IN_PROGRESS',
+        'session.startedAt': now,
+        'session.warnAt': new Date(now.getTime() + WARN_MS),
+        'session.endsAt': new Date(now.getTime() + SESSION_MS),
+      },
+    },
+    { returnDocument: 'after' },
+  );
 
-  await booking.save();
+  if (!booking) throw await explainFailure(bookingId, trainerId, 'start');
 
   await sendNotification(
     booking.customerId,
@@ -30,64 +47,63 @@ export async function startSession(bookingId: string, trainerId: string) {
   return booking;
 }
 
-export async function getSessionTicker(bookingId: string) {
+/** Same ticker output as before, but only people who belong to the booking can read it. */
+export async function getSessionTicker(bookingId: string, auth: AuthUser) {
   const booking = await Booking.findById(bookingId);
   if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+  assertCanViewBooking(booking, auth);
 
   const serverTime = new Date();
+  const started = booking.session?.startedAt;
+  const endsAt = booking.session?.endsAt;
 
-  if (!booking.session || !booking.session.startedAt || !booking.session.endsAt) {
+  if (!started || !endsAt) {
     return {
       status: booking.status,
       serverTime,
       startedAt: null,
       endsAt: null,
+      elapsedSeconds: 0,
       remainingSeconds: 0,
       is55MinWarning: false,
       isCompleted: booking.status === 'COMPLETED',
     };
   }
 
-  const startedAt = booking.session.startedAt;
-  const endsAt = booking.session.endsAt;
-  const warnAt = booking.session.warnAt || new Date(startedAt.getTime() + 55 * 60 * 1000);
-
-  const elapsedMs = serverTime.getTime() - startedAt.getTime();
+  const warnAt = booking.session?.warnAt ?? new Date(started.getTime() + WARN_MS);
   const remainingMs = Math.max(0, endsAt.getTime() - serverTime.getTime());
-  const remainingSeconds = Math.floor(remainingMs / 1000);
+  const isTimeUp = serverTime.getTime() >= endsAt.getTime();
+  let status = booking.status;
 
-  const is55MinWarning = serverTime >= warnAt && remainingSeconds > 0;
-  const isCompleted = serverTime >= endsAt || booking.status === 'COMPLETED';
-
-  // Auto-transition to COMPLETED if 60 minutes have elapsed
-  if (isCompleted && booking.status === 'IN_PROGRESS') {
-    booking.status = 'COMPLETED';
-    booking.session.completeFiredAt = serverTime;
-    await booking.save();
+  // Lazy completion (a background job takes this over in Phase 15).
+  if (isTimeUp && booking.status === 'IN_PROGRESS') {
+    await Booking.updateOne(
+      { _id: booking._id, status: 'IN_PROGRESS' },
+      { $set: { status: 'COMPLETED', 'session.completeFiredAt': serverTime } },
+    );
+    status = 'COMPLETED';
   }
 
   return {
-    status: booking.status,
+    status,
     serverTime,
-    startedAt,
+    startedAt: started,
     endsAt,
-    elapsedSeconds: Math.floor(elapsedMs / 1000),
-    remainingSeconds,
-    is55MinWarning,
-    isCompleted,
+    elapsedSeconds: Math.floor((serverTime.getTime() - started.getTime()) / 1000),
+    remainingSeconds: Math.floor(remainingMs / 1000),
+    is55MinWarning: serverTime.getTime() >= warnAt.getTime() && !isTimeUp,
+    isCompleted: isTimeUp || status === 'COMPLETED',
   };
 }
 
 export async function completeSession(bookingId: string, trainerId: string) {
-  const booking = await Booking.findById(bookingId);
-  if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
-  if (booking.trainerId !== trainerId) throw new AppError(403, 'FORBIDDEN', 'Not assigned to this session');
+  const booking = await Booking.findOneAndUpdate(
+    { _id: bookingId, trainerId, status: 'IN_PROGRESS' },
+    { $set: { status: 'COMPLETED', 'session.completeFiredAt': new Date() } },
+    { returnDocument: 'after' },
+  );
 
-  booking.status = 'COMPLETED';
-  if (booking.session) {
-    booking.session.completeFiredAt = new Date();
-  }
-  await booking.save();
+  if (!booking) throw await explainFailure(bookingId, trainerId, 'complete');
 
   await sendNotification(
     booking.customerId,

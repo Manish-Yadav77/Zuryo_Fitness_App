@@ -25,4 +25,7 @@ const customerPackageSchema = new Schema<ICustomerPackage>(
   { timestamps: true },
 );
 
+// One verified payment can create at most one package (also makes verify retries safe).
+customerPackageSchema.index({ paymentId: 1 }, { unique: true, sparse: true });
+
 export const CustomerPackage = model<ICustomerPackage>('CustomerPackage', customerPackageSchema);

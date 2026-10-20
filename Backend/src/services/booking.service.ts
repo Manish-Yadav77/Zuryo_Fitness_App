@@ -8,6 +8,7 @@ import { calculateQuoteForDate } from './pricing.service.js';
 import { ceilToAtom, getSessionAtoms } from './time.js';
 import { sendNotification } from './notification.service.js';
 import { AppError } from '../utils/AppError.js';
+import { formatIst } from '../utils/timeFormat.js';
 
 export interface CreateBookingInput {
   customerId: string;
@@ -18,6 +19,7 @@ export interface CreateBookingInput {
   idempotencyKey?: string;
 }
 
+// NOTE: rewritten in Phase 13 (payment hold, package mode, stronger idempotency).
 export async function createBooking(input: CreateBookingInput) {
   if (input.idempotencyKey) {
     const existing = await Booking.findOne({
@@ -110,11 +112,10 @@ export async function createBooking(input: CreateBookingInput) {
     await session.commitTransaction();
     session.endSession();
 
-    // Trigger in-app notification for the assigned trainer
     await sendNotification(
       chosenTrainerId,
       'BOOKING_ASSIGNED',
-      `New workout session assigned for ${roundedStart.toLocaleString()}!`,
+      `New workout session assigned for ${formatIst(roundedStart)}.`,
       bookingDoc._id.toString(),
     );
 

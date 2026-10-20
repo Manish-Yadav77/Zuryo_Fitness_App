@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { postCreateOrder, postVerifyPayment } from '../controllers/payment.controller.js';
-import { requireAuth } from '../middleware/auth.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
 
-router.post('/order', requireAuth, postCreateOrder);
-router.post('/verify', requireAuth, postVerifyPayment);
+router.post('/order', requireAuth, requireRole('customer'), postCreateOrder);
+router.post('/verify', requireAuth, requireRole('customer'), postVerifyPayment);
 
 export default router;

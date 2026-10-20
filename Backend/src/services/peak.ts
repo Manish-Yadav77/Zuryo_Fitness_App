@@ -1,53 +1,33 @@
 import type { PeakWindow } from '../models/PricingConfig.js';
 
-/** Checks if a slot starting at `date` falls inside any peak window in IST time. */
-export function isPeakSlot(date: Date, peakWindows: PeakWindow[]): boolean {
-  // Convert UTC date to Asia/Kolkata time parts
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Kolkata',
-    weekday: 'short',
-    hour: 'numeric',
-    minute: 'numeric',
-    hour12: false,
-  });
+const DAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
 
-  const parts = formatter.formatToParts(date);
+const istParts = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata',
+  weekday: 'short',
+  hour: 'numeric',
+  minute: 'numeric',
+  hourCycle: 'h23',
+});
+
+/** Weekday (0 = Sunday) and minutes since midnight of a moment, in India time. */
+export function getIstWeekdayAndMinutes(date: Date): { weekday: number; minutes: number } {
   let weekdayStr = '';
   let hour = 0;
   let minute = 0;
-
-  for (const part of parts) {
+  for (const part of istParts.formatToParts(date)) {
     if (part.type === 'weekday') weekdayStr = part.value;
     if (part.type === 'hour') hour = parseInt(part.value, 10);
     if (part.type === 'minute') minute = parseInt(part.value, 10);
   }
+  return { weekday: DAY_INDEX[weekdayStr] ?? 0, minutes: hour * 60 + minute };
+}
 
-  const dayMap: Record<string, number> = {
-    Sun: 0,
-    Mon: 1,
-    Tue: 2,
-    Wed: 3,
-    Thu: 4,
-    Fri: 5,
-    Sat: 6,
-  };
-
-  const currentWeekday = dayMap[weekdayStr] ?? 0;
-  const currentMinutes = hour * 60 + minute;
-
-  for (const window of peakWindows) {
-    if (!window.weekdays.includes(currentWeekday)) continue;
-
-    const [startH, startM] = window.start.split(':').map((v) => parseInt(v, 10));
-    const [endH, endM] = window.end.split(':').map((v) => parseInt(v, 10));
-
-    const windowStartMinutes = (startH ?? 0) * 60 + (startM ?? 0);
-    const windowEndMinutes = (endH ?? 0) * 60 + (endM ?? 0);
-
-    if (currentMinutes >= windowStartMinutes && currentMinutes < windowEndMinutes) {
-      return true;
-    }
-  }
-
-  return false;
+/** A slot is peak when its START time falls inside any peak window (start inclusive, end exclusive). */
+export function isPeakSlot(slotStart: Date, peakWindows: PeakWindow[]): boolean {
+  if (!peakWindows || peakWindows.length === 0) return false;
+  const { weekday, minutes } = getIstWeekdayAndMinutes(slotStart);
+  return peakWindows.some(
+    (w) => w.weekdays.includes(weekday) && minutes >= w.startMinute && minutes < w.endMinute,
+  );
 }

@@ -1,9 +1,9 @@
 import { Schema, model } from 'mongoose';
 
 export interface PeakWindow {
-  weekdays: number[]; // 0 = Sun, 1 = Mon ... 6 = Sat
-  start: string; // "HH:mm" in IST
-  end: string; // "HH:mm" in IST
+  weekdays: number[];
+  startMinute: number;
+  endMinute: number;
 }
 
 export interface IPricingConfig {
@@ -18,9 +18,9 @@ export interface IPricingConfig {
 
 const peakWindowSchema = new Schema<PeakWindow>(
   {
-    weekdays: [{ type: Number, required: true }],
-    start: { type: String, required: true },
-    end: { type: String, required: true },
+    weekdays: [{ type: Number }],
+    startMinute: { type: Number, required: true },
+    endMinute: { type: Number, required: true },
   },
   { _id: false },
 );

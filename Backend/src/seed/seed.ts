@@ -74,8 +74,8 @@ const TRAINER_DETAILS: Record<string, { rating: number; bio: string; zones: stri
     rating: 4.9,
     bio: 'Boxing & Endurance coach for general cardio fitness and weight loss.',
     zones: ['zone-bangalore-south', 'zone-bangalore-east'],
-    lat: 12.9150,
-    lng: 77.6500,
+    lat: 12.915,
+    lng: 77.65,
   },
 };
 
@@ -94,8 +94,8 @@ async function seed() {
 
     createdUsers[u.email] = userDoc._id.toString();
 
-    if (u.role === 'trainer' && TRAINER_DETAILS[u.email]) {
-      const details = TRAINER_DETAILS[u.email]!;
+    const details = TRAINER_DETAILS[u.email];
+    if (u.role === 'trainer' && details) {
       await TrainerProfile.updateOne(
         { userId: userDoc._id.toString() },
         {
@@ -129,12 +129,15 @@ async function seed() {
 
   const createdSocieties: Record<string, string> = {};
   for (const s of SEED_SOCIETIES) {
-    const soc = await Society.findOneAndUpdate({ name: s.name }, { $set: { ...s, isActive: true } }, { upsert: true, returnDocument: 'after' });
+    const soc = await Society.findOneAndUpdate(
+      { name: s.name },
+      { $set: { ...s, isActive: true } },
+      { upsert: true, returnDocument: 'after' },
+    );
     createdSocieties[s.name] = soc._id.toString();
     console.log(`seeded society: ${s.name}`);
   }
 
-  // Seed Customer Profile and Assessment for demo customer
   const customerId = createdUsers['customer@demo.test'];
   const prestigeId = createdSocieties['Prestige Ferns Residency'];
 
@@ -162,10 +165,11 @@ async function seed() {
     console.log('seeded customer profile & fitness assessment for customer@demo.test');
   }
 
-  await PricingConfig.updateOne(
+  // Pricing is created ONLY if it does not exist yet, so re-seeding never overwrites admin edits.
+  const pricingResult = await PricingConfig.updateOne(
     { _id: 'default' },
     {
-      $set: {
+      $setOnInsert: {
         normalPaise: 39900,
         peakPaise: 49900,
         commissionPercent: 10,
@@ -176,13 +180,14 @@ async function seed() {
     },
     { upsert: true },
   );
+  console.log(pricingResult.upsertedCount ? 'seeded pricing config' : 'pricing config already exists (kept as is)');
 
   for (const p of SEED_PACKAGES) {
     await PackageTemplate.updateOne({ name: p.name }, { $set: { ...p, isActive: true } }, { upsert: true });
   }
 
   await disconnectDb();
-  console.log('Seed complete with rich demo data');
+  console.log('Seed complete');
 }
 
 seed().catch((err) => {

@@ -1,13 +1,22 @@
 import { api } from './client';
-import type { PriceQuote, PricingConfig } from '@/types/pricing';
+import type { PricingConfig, PriceQuote } from '@/types/pricing';
 
 export const pricingApi = {
   async getConfig(): Promise<PricingConfig> {
     const { data } = await api.get<{ config: PricingConfig }>('/pricing/config');
     return data.config;
   },
-  async getQuote(startAtIso: string): Promise<PriceQuote> {
-    const { data } = await api.post<{ quote: PriceQuote }>('/pricing/quote', { startAt: startAtIso });
+  async updateConfig(payload: {
+    normalPaise: number;
+    peakPaise: number;
+    commissionPercent: number;
+  }): Promise<PricingConfig> {
+    const { data } = await api.put<{ config: PricingConfig }>('/pricing/config', payload);
+    return data.config;
+  },
+  async getQuote(dateIso?: string): Promise<PriceQuote> {
+    const query = dateIso ? `?date=${encodeURIComponent(dateIso)}` : '';
+    const { data } = await api.get<{ quote: PriceQuote }>(`/pricing/quote${query}`);
     return data.quote;
   },
 };

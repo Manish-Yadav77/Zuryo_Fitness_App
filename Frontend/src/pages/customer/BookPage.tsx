@@ -131,8 +131,8 @@ export default function BookPage() {
       // 2. Load Razorpay script
       const loaded = await loadRazorpayScript();
       if (!loaded || !window.Razorpay) {
-        // Fallback if script fails to load
-        navigate(`/customer/bookings/${booking._id}`);
+        setError('Could not load the payment window. Check your internet connection and try again.');
+        setBookingLoading(false);
         return;
       }
 
