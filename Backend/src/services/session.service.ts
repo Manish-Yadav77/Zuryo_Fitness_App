@@ -47,6 +47,16 @@ export async function startSession(bookingId: string, trainerId: string) {
   return booking;
 }
 
+export async function markOnTheWay(bookingId: string, trainerId: string) {
+  const booking = await Booking.findOneAndUpdate(
+    { _id: bookingId, trainerId, status: 'CONFIRMED' },
+    { $set: { status: 'ON_THE_WAY' } }, { returnDocument: 'after' },
+  );
+  if (!booking) throw await explainFailure(bookingId, trainerId, 'mark on the way');
+  await sendNotification(booking.customerId, 'SESSION_REMINDER', 'Your trainer is on the way.', booking._id.toString());
+  return booking;
+}
+
 /** Same ticker output as before, but only people who belong to the booking can read it. */
 export async function getSessionTicker(bookingId: string, auth: AuthUser) {
   const booking = await Booking.findById(bookingId);

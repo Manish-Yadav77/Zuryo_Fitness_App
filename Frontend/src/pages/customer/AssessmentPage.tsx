@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
+import { Building2, Activity, Target, HeartPulse } from 'lucide-react';
 import { assessmentApi } from '@/api/assessment.api';
 import { societyApi } from '@/api/society.api';
 import type { FitnessLevel } from '@/types/assessment';
@@ -11,8 +12,23 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 
-const GOAL_OPTIONS = ['Fat Loss', 'Muscle Gain', 'Strength', 'Endurance', 'Flexibility & Mobility', 'General Fitness'];
-const PREFERENCE_OPTIONS = ['HIIT', 'Strength Training', 'Yoga', 'Cardio', 'Bodyweight / Calisthenics', 'Boxing / Kickboxing'];
+const GOAL_OPTIONS = [
+  'Fat Loss',
+  'Muscle Gain',
+  'Strength',
+  'Endurance',
+  'Flexibility & Mobility',
+  'General Fitness',
+];
+
+const PREFERENCE_OPTIONS = [
+  'HIIT',
+  'Strength Training',
+  'Yoga',
+  'Cardio',
+  'Bodyweight / Calisthenics',
+  'Boxing / Kickboxing',
+];
 
 export default function AssessmentPage() {
   const [societies, setSocieties] = useState<Society[]>([]);
@@ -39,13 +55,16 @@ export default function AssessmentPage() {
           societyApi.getSocieties(),
           assessmentApi.getMine(),
         ]);
-        setSocieties(socList);
-        if (socList.length > 0 && !myData.profile) {
+        setSocieties(socList || []);
+        if (socList && socList.length > 0 && !myData.profile) {
           setSocietyId(socList[0]._id);
         }
 
         if (myData.profile) {
-          const sId = typeof myData.profile.societyId === 'object' ? myData.profile.societyId._id : myData.profile.societyId;
+          const sId =
+            typeof myData.profile.societyId === 'object'
+              ? myData.profile.societyId._id
+              : myData.profile.societyId;
           setSocietyId(sId);
           setFlatNumber(myData.profile.flatNumber ?? '');
           setPhone(myData.profile.phone ?? '');
@@ -54,9 +73,9 @@ export default function AssessmentPage() {
         if (myData.assessment) {
           setAge(myData.assessment.age);
           setWeightKg(myData.assessment.weightKg);
-          setGoals(myData.assessment.goals);
-          setLevel(myData.assessment.level);
-          setPreferences(myData.assessment.preferences);
+          setGoals(myData.assessment.goals || []);
+          setLevel(myData.assessment.level || 'beginner');
+          setPreferences(myData.assessment.preferences || []);
           setLimitations(myData.assessment.limitations ?? '');
           setVersion(myData.assessment.version);
         }
@@ -69,7 +88,11 @@ export default function AssessmentPage() {
     loadData();
   }, []);
 
-  function toggleItem(list: string[], setList: (val: string[]) => void, item: string) {
+  function toggleItem(
+    list: string[],
+    setList: (val: string[]) => void,
+    item: string
+  ) {
     if (list.includes(item)) {
       setList(list.filter((i) => i !== item));
     } else {
@@ -105,7 +128,9 @@ export default function AssessmentPage() {
         limitations,
       });
       setVersion(res.assessment.version);
-      setSuccessMsg(`Fitness assessment saved successfully (Version ${res.assessment.version}).`);
+      setSuccessMsg(
+        `Fitness assessment saved successfully (Version ${res.assessment.version}).`
+      );
     } catch (err) {
       setError(parseApiError(err).message);
     } finally {
@@ -113,31 +138,73 @@ export default function AssessmentPage() {
     }
   }
 
-  if (loading) return <div className="py-10 text-center text-slate-500">Loading fitness profile...</div>;
+  if (loading) {
+    return (
+      <div className="flex min-h-[300px] items-center justify-center py-12 text-sm text-slate-500">
+        Loading fitness profile...
+      </div>
+    );
+  }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-6">
-      <div className="flex items-center justify-between">
+    <div>
+      {/* Header Section */}
+      <div className="mb-6 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-slate-900">Fitness Assessment</h1>
-          <p className="text-sm text-slate-500">Help trainers customize your workouts by sharing your goals and health profile.</p>
+          <p className="text-xs font-bold uppercase tracking-wider text-emerald-600">
+            Personalized Profile
+          </p>
+          <h1 className="text-2xl font-bold tracking-tight text-slate-900 sm:text-3xl">
+            Fitness Assessment
+          </h1>
+          <p className="text-sm text-slate-500">
+            Help trainers customize your workouts by sharing your goals and health profile.
+          </p>
         </div>
-        {version && <Badge tone="emerald">Version {version}</Badge>}
+        {version && (
+          <div className="self-start sm:self-center">
+            <Badge tone="emerald">Version {version}</Badge>
+          </div>
+        )}
       </div>
 
-      {error && <Alert tone="error">{error}</Alert>}
-      {successMsg && <Alert tone="success">{successMsg}</Alert>}
+      {error && (
+        <div className="mb-6">
+          <Alert tone="error">{error}</Alert>
+        </div>
+      )}
+      {successMsg && (
+        <div className="mb-6">
+          <Alert tone="success">{successMsg}</Alert>
+        </div>
+      )}
 
       <form onSubmit={handleSubmit} className="space-y-6">
-        <Card className="space-y-4">
-          <h2 className="text-base font-semibold text-slate-900">1. Residence & Contact</h2>
+        {/* Step 1: Residence & Contact */}
+        <Card className="p-5 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+              <Building2 className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                1. Residence & Contact
+              </h2>
+              <p className="text-xs text-slate-500">
+                Your primary training location and contact details.
+              </p>
+            </div>
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-2">
             <div>
-              <label className="mb-1.5 block text-sm font-medium text-slate-700">Society</label>
+              <label className="mb-1.5 block text-xs font-bold uppercase tracking-wider text-slate-500">
+                Society
+              </label>
               <select
                 value={societyId}
                 onChange={(e) => setSocietyId(e.target.value)}
-                className="block w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-sm text-slate-900 outline-none focus:border-emerald-500"
+                className="w-full rounded-xl border border-slate-300 bg-white px-3.5 py-2.5 text-xs font-medium text-slate-900 shadow-xs outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 sm:text-sm"
               >
                 <option value="">Select your society</option>
                 {societies.map((s) => (
@@ -147,6 +214,7 @@ export default function AssessmentPage() {
                 ))}
               </select>
             </div>
+
             <Input
               label="Flat / House Number"
               placeholder="e.g. B-402"
@@ -154,6 +222,7 @@ export default function AssessmentPage() {
               onChange={(e) => setFlatNumber(e.target.value)}
             />
           </div>
+
           <Input
             label="Phone Number"
             placeholder="e.g. +91 9876543210"
@@ -162,8 +231,22 @@ export default function AssessmentPage() {
           />
         </Card>
 
-        <Card className="space-y-4">
-          <h2 className="text-base font-semibold text-slate-900">2. Body Metrics & Experience</h2>
+        {/* Step 2: Body Metrics & Experience */}
+        <Card className="p-5 shadow-sm space-y-4">
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+              <Activity className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                2. Body Metrics & Experience
+              </h2>
+              <p className="text-xs text-slate-500">
+                Basic health stats to calibrate session workout intensity.
+              </p>
+            </div>
+          </div>
+
           <div className="grid gap-4 sm:grid-cols-2">
             <Input
               label="Age"
@@ -171,7 +254,9 @@ export default function AssessmentPage() {
               min={10}
               max={100}
               value={age}
-              onChange={(e) => setAge(e.target.value === '' ? '' : Number(e.target.value))}
+              onChange={(e) =>
+                setAge(e.target.value === '' ? '' : Number(e.target.value))
+              }
             />
             <Input
               label="Weight (kg)"
@@ -179,35 +264,57 @@ export default function AssessmentPage() {
               min={20}
               max={300}
               value={weightKg}
-              onChange={(e) => setWeightKg(e.target.value === '' ? '' : Number(e.target.value))}
+              onChange={(e) =>
+                setWeightKg(e.target.value === '' ? '' : Number(e.target.value))
+              }
             />
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-slate-700">Experience Level</label>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-500">
+              Experience Level
+            </label>
             <div className="grid grid-cols-3 gap-3">
-              {(['beginner', 'intermediate', 'advanced'] as FitnessLevel[]).map((lvl) => (
-                <button
-                  key={lvl}
-                  type="button"
-                  onClick={() => setLevel(lvl)}
-                  className={`rounded-xl border py-2.5 text-center text-sm font-medium capitalize transition ${
-                    level === lvl
-                      ? 'border-emerald-600 bg-emerald-50 text-emerald-700'
-                      : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                  }`}
-                >
-                  {lvl}
-                </button>
-              ))}
+              {(['beginner', 'intermediate', 'advanced'] as FitnessLevel[]).map(
+                (lvl) => (
+                  <button
+                    key={lvl}
+                    type="button"
+                    onClick={() => setLevel(lvl)}
+                    className={`rounded-xl border py-2.5 text-center text-xs font-bold capitalize transition-all ${
+                      level === lvl
+                        ? 'border-emerald-600 bg-emerald-50 text-emerald-700 shadow-xs'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    {lvl}
+                  </button>
+                )
+              )}
             </div>
           </div>
         </Card>
 
-        <Card className="space-y-4">
-          <h2 className="text-base font-semibold text-slate-900">3. Goals & Preferences</h2>
+        {/* Step 3: Goals & Preferences */}
+        <Card className="p-5 shadow-sm space-y-5">
+          <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+              <Target className="h-4 w-4" />
+            </div>
+            <div>
+              <h2 className="text-base font-bold text-slate-900">
+                3. Goals & Preferences
+              </h2>
+              <p className="text-xs text-slate-500">
+                Targeted focus areas and health/injury conditions.
+              </p>
+            </div>
+          </div>
+
           <div>
-            <label className="mb-2 block text-sm font-medium text-slate-700">Fitness Goals</label>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-500">
+              Fitness Goals
+            </label>
             <div className="flex flex-wrap gap-2">
               {GOAL_OPTIONS.map((g) => {
                 const active = goals.includes(g);
@@ -216,9 +323,9 @@ export default function AssessmentPage() {
                     key={g}
                     type="button"
                     onClick={() => toggleItem(goals, setGoals, g)}
-                    className={`rounded-xl px-3.5 py-2 text-xs font-medium transition ${
+                    className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
                       active
-                        ? 'bg-emerald-600 text-white'
+                        ? 'bg-emerald-600 text-white shadow-xs'
                         : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                     }`}
                   >
@@ -230,7 +337,9 @@ export default function AssessmentPage() {
           </div>
 
           <div>
-            <label className="mb-2 block text-sm font-medium text-slate-700">Workout Preferences</label>
+            <label className="mb-2 block text-xs font-bold uppercase tracking-wider text-slate-500">
+              Workout Preferences
+            </label>
             <div className="flex flex-wrap gap-2">
               {PREFERENCE_OPTIONS.map((p) => {
                 const active = preferences.includes(p);
@@ -239,9 +348,9 @@ export default function AssessmentPage() {
                     key={p}
                     type="button"
                     onClick={() => toggleItem(preferences, setPreferences, p)}
-                    className={`rounded-xl px-3.5 py-2 text-xs font-medium transition ${
+                    className={`rounded-xl px-3.5 py-2 text-xs font-semibold transition-all ${
                       active
-                        ? 'bg-teal-600 text-white'
+                        ? 'bg-teal-600 text-white shadow-xs'
                         : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                     }`}
                   >
@@ -253,20 +362,33 @@ export default function AssessmentPage() {
           </div>
 
           <div>
-            <label className="mb-1.5 block text-sm font-medium text-slate-700">Medical Limitations or Injuries (Optional)</label>
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <HeartPulse className="h-4 w-4 text-rose-500" />
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                Medical Limitations or Injuries (Optional)
+              </label>
+            </div>
             <textarea
               rows={3}
               placeholder="e.g. Mild lower back pain, recovering from knee surgery"
               value={limitations}
               onChange={(e) => setLimitations(e.target.value)}
-              className="block w-full rounded-xl border border-slate-300 p-3 text-sm text-slate-900 outline-none focus:border-emerald-500"
+              className="w-full rounded-xl border border-slate-300 p-3 text-xs text-slate-900 shadow-xs outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
             />
           </div>
         </Card>
 
-        <Button type="submit" fullWidth loading={submitting}>
-          Save Assessment
-        </Button>
+        {/* Submit Button */}
+        <div className="pt-2">
+          <Button
+            type="submit"
+            fullWidth
+            loading={submitting}
+            className="py-3 font-bold text-sm"
+          >
+            Save Fitness Assessment
+          </Button>
+        </div>
       </form>
     </div>
   );

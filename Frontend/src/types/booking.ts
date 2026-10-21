@@ -19,6 +19,21 @@ export interface PriceSnapshot {
   configVersion: number;
 }
 
+export interface CustomerDetails {
+  name?: string;
+  flatNumber?: string;
+  phone?: string;
+}
+
+export interface SessionRecordSnapshot {
+  durationMinutes?: number;
+  exercises?: { name: string; sets: number; reps?: number; weightKg?: number }[];
+  trainerNotes?: string;
+  suggestedNextWorkout?: string;
+  customerRating?: number;
+  customerFeedback?: string;
+}
+
 export interface Booking {
   _id: string;
   customerId: string;
@@ -31,8 +46,13 @@ export interface Booking {
   paymentMode: 'PAYMENT' | 'PACKAGE';
   priceSnapshot: PriceSnapshot;
   preferredTrainerId?: string;
+  packageId?: string;
+  holdExpiresAt?: string;
+  rescheduleCount?: number;
   preferredHonored?: boolean;
   createdAt: string;
+  customerDetails?: CustomerDetails;
+  sessionRecord?: SessionRecordSnapshot | null;
 }
 
 export interface CreateBookingPayload {
@@ -40,4 +60,6 @@ export interface CreateBookingPayload {
   mode: BookingMode;
   startAt: string;
   preferredTrainerId?: string;
+  paymentMode: 'PAYMENT' | 'PACKAGE';
+  packageId?: string;
 }

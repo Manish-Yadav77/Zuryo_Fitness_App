@@ -2,11 +2,6 @@ import { connectDb, disconnectDb } from '../config/db.js';
 import { PricingConfig } from '../models/PricingConfig.js';
 import { DEFAULT_PEAK_WINDOWS, getPricingConfig } from '../services/pricing.service.js';
 
-/**
- * One-time migration: replaces the stored peak windows with the current defaults
- * (old documents used a different shape) and bumps the pricing version.
- * Rates and commission are NOT touched.
- */
 async function run() {
   await connectDb();
   await getPricingConfig(); // makes sure the document exists

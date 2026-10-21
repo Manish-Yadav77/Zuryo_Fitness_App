@@ -38,7 +38,7 @@ export function AiRecommendationCard() {
             <p className="text-xs text-slate-500">Personalized routine tailored to your goals & history.</p>
           </div>
         </div>
-        <Badge tone="emerald">Powered by Gemini AI</Badge>
+        <Badge tone="emerald">{recommendation ? `${recommendation.source} · ${recommendation.latencyMs}ms` : 'AI + rules fallback'}</Badge>
       </div>
 
       {error && <Alert tone="error">{error}</Alert>}
@@ -46,7 +46,7 @@ export function AiRecommendationCard() {
       {!recommendation ? (
         <div className="py-4 text-center">
           <p className="text-xs text-slate-600 mb-4">
-            Click below to generate a tailored 60-minute workout based on your fitness level and past session notes[cite: 12].
+            Generates a tailored 60-minute workout from your fitness profile and past sessions.
           </p>
           <Button onClick={handleGenerate} loading={loading}>
             <Bot className="h-4 w-4" /> Generate AI Recommendation

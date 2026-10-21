@@ -10,6 +10,8 @@ export interface INotification {
   userId: string;
   type: NotificationType;
   bookingId?: Types.ObjectId | string;
+  title?: string;
+  data?: Record<string, unknown>;
   message: string;
   readAt?: Date;
 }
@@ -23,6 +25,8 @@ const notificationSchema = new Schema<INotification>(
       required: true,
     },
     bookingId: { type: Schema.Types.ObjectId, ref: 'Booking' },
+    title: { type: String, trim: true },
+    data: { type: Schema.Types.Mixed },
     message: { type: String, required: true, trim: true },
     readAt: { type: Date },
   },

@@ -62,11 +62,13 @@ export async function updatePricingConfig(data: {
   normalPaise: number;
   peakPaise: number;
   commissionPercent: number;
+  peakWindows: PeakWindow[];
 }) {
   const current = await getPricingConfig();
   current.normalPaise = data.normalPaise;
   current.peakPaise = data.peakPaise;
   current.commissionPercent = data.commissionPercent;
+  current.peakWindows = data.peakWindows;
   current.version += 1;
   await current.save();
   return current;

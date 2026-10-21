@@ -8,10 +8,10 @@ import trainerRoutes from './trainer.routes.js';
 import bookingRoutes from './booking.routes.js';
 import paymentRoutes from './payment.routes.js';
 import packageRoutes from './package.routes.js';
-import recordRoutes from './record.routes.js';
 import availabilityRoutes from './availability.routes.js';
-import { getMyNotifications, patchMarkRead } from '../controllers/notification.controller.js';
-import { requireAuth } from '../middleware/auth.js';
+import recordRoutes from './record.routes.js';
+import tickerRoutes from './ticker.routes.js';
+import notificationRoutes from './notification.routes.js';
 
 const router = Router();
 
@@ -31,10 +31,9 @@ router.use('/trainer', trainerRoutes);
 router.use('/bookings', bookingRoutes);
 router.use('/payments', paymentRoutes);
 router.use('/packages', packageRoutes);
-router.use('/records', recordRoutes);
 router.use('/availability', availabilityRoutes);
-
-router.get('/notifications', requireAuth, getMyNotifications);
-router.patch('/notifications/:id/read', requireAuth, patchMarkRead);
+router.use('/records', recordRoutes);
+router.use('/ticker', tickerRoutes);
+router.use('/notifications', notificationRoutes);
 
 export default router;

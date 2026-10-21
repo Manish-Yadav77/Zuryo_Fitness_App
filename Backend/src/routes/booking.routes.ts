@@ -8,7 +8,7 @@ import {
   postBooking,
 } from '../controllers/booking.controller.js';
 import { postCancelBooking, postRescheduleBooking } from '../controllers/cancellation.controller.js';
-import { getTicker, postCompleteSession, postStartSession } from '../controllers/session.controller.js';
+import { getTicker, postCompleteSession, postOnTheWay, postStartSession } from '../controllers/session.controller.js';
 import { requireAuth, requireRole } from '../middleware/auth.js';
 
 const router = Router();
@@ -25,6 +25,7 @@ router.post('/:id/reschedule', requireAuth, requireRole('customer'), postResched
 
 // Live session timer routes
 router.post('/:id/session/start', requireAuth, requireRole('trainer'), postStartSession);
+router.post('/:id/session/on-the-way', requireAuth, requireRole('trainer'), postOnTheWay);
 router.get('/:id/session/ticker', requireAuth, getTicker);
 router.post('/:id/session/complete', requireAuth, requireRole('trainer'), postCompleteSession);
 

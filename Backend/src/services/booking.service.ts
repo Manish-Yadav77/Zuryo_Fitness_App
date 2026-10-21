@@ -9,6 +9,7 @@ import { ceilToAtom, getSessionAtoms } from './time.js';
 import { sendNotification } from './notification.service.js';
 import { AppError } from '../utils/AppError.js';
 import { formatIst } from '../utils/timeFormat.js';
+import { consumePackageForBooking } from './package.service.js';
 
 export interface CreateBookingInput {
   customerId: string;
@@ -17,6 +18,8 @@ export interface CreateBookingInput {
   startAt: Date;
   preferredTrainerId?: string;
   idempotencyKey?: string;
+  paymentMode: 'PAYMENT' | 'PACKAGE';
+  packageId?: string;
 }
 
 export async function createBooking(input: CreateBookingInput) {
@@ -29,14 +32,14 @@ export async function createBooking(input: CreateBookingInput) {
   }
 
   const now = new Date();
-  const minLead = new Date(now.getTime() + 10 * 60 * 1000);
+  const minStart = new Date(now.getTime() + 10 * 60 * 1000);
   const maxHorizon = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
-  if (input.startAt < minLead) {
-    throw new AppError(400, 'SLOT_IN_PAST', 'Bookings must be scheduled at least 10 minutes in advance');
+  if (input.startAt < minStart) {
+    throw new AppError(400, 'INVALID_SLOT_TIME', 'Booking must be made at least 10 minutes in advance');
   }
   if (input.startAt > maxHorizon) {
-    throw new AppError(400, 'SLOT_TOO_FAR', 'Bookings cannot be scheduled more than 30 days in advance');
+    throw new AppError(400, 'INVALID_SLOT_TIME', 'Bookings cannot be made more than 30 days in advance');
   }
 
   if (input.mode === 'INSTANT') {
@@ -49,14 +52,15 @@ export async function createBooking(input: CreateBookingInput) {
   const roundedStart = ceilToAtom(input.startAt);
   const roundedEnd = new Date(roundedStart.getTime() + 60 * 60 * 1000);
 
-  const customerOverlap = await Booking.exists({
+  const overlappingCustomerBooking = await Booking.exists({
     customerId: input.customerId,
     status: { $in: ['PENDING_PAYMENT', 'CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS'] },
     startAt: { $lt: roundedEnd },
     endAt: { $gt: roundedStart },
   });
-  if (customerOverlap) {
-    throw new AppError(409, 'CUSTOMER_OVERLAP', 'You already have another active booking overlapping this time slot');
+
+  if (overlappingCustomerBooking) {
+    throw new AppError(409, 'CUSTOMER_OVERLAP', 'You already have an active booking during this time slot');
   }
 
   const quote = await calculateQuoteForDate(roundedStart);
@@ -87,8 +91,9 @@ export async function createBooking(input: CreateBookingInput) {
       mode: input.mode,
       startAt: roundedStart,
       endAt: roundedEnd,
-      status: 'CONFIRMED',
-      paymentMode: 'PAYMENT',
+      status: input.paymentMode === 'PACKAGE' ? 'CONFIRMED' : 'PENDING_PAYMENT',
+      paymentMode: input.paymentMode,
+      holdExpiresAt: input.paymentMode === 'PAYMENT' ? new Date(now.getTime() + 10 * 60 * 1000) : undefined,
       priceSnapshot: {
         tier: quote.tier,
         sessionPaise: quote.sessionPaise,
@@ -108,10 +113,17 @@ export async function createBooking(input: CreateBookingInput) {
       trainerId: chosenTrainerId,
       atomStart: atom,
       bookingId: bookingDoc._id,
-      state: 'CONFIRMED' as const,
+      state: input.paymentMode === 'PACKAGE' ? ('CONFIRMED' as const) : ('HELD' as const),
+      holdExpiresAt: input.paymentMode === 'PAYMENT' ? bookingDoc.holdExpiresAt : undefined,
     }));
 
     await SlotLock.insertMany(locks, { session });
+
+    if (input.paymentMode === 'PACKAGE') {
+      const pkg = await consumePackageForBooking(input.customerId, bookingDoc._id.toString(), session, input.packageId);
+      bookingDoc.packageId = pkg._id.toString();
+      await bookingDoc.save({ session });
+    }
 
     await AssignmentDecision.create(
       [
@@ -131,12 +143,9 @@ export async function createBooking(input: CreateBookingInput) {
     await session.commitTransaction();
     session.endSession();
 
-    await sendNotification(
-      chosenTrainerId,
-      'BOOKING_ASSIGNED',
-      `New workout session assigned for ${formatIst(roundedStart)}.`,
-      bookingDoc._id.toString(),
-    );
+    if (input.paymentMode === 'PACKAGE') {
+      await sendNotification(chosenTrainerId, 'BOOKING_ASSIGNED', `New workout session assigned for ${formatIst(roundedStart)}.`, bookingDoc._id.toString());
+    }
 
     return bookingDoc;
   } catch (err) {

@@ -1,28 +1,31 @@
-export function formatIstDateInput(date: Date = new Date()): string {
-  const parts = new Intl.DateTimeFormat('en-CA', {
+export function toIstString(date: Date): string {
+  return new Intl.DateTimeFormat('en-IN', {
     timeZone: 'Asia/Kolkata',
     year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).formatToParts(date);
-
-  const year = parts.find((p) => p.type === 'year')?.value ?? '2026';
-  const month = parts.find((p) => p.type === 'month')?.value ?? '10';
-  const day = parts.find((p) => p.type === 'day')?.value ?? '20';
-
-  return `${year}-${month}-${day}`;
-}
-
-export function formatIstDisplay(dateInput: Date | string): string {
-  const date = typeof dateInput === 'string' ? new Date(dateInput) : dateInput;
-  const formatter = new Intl.DateTimeFormat('en-IN', {
-    timeZone: 'Asia/Kolkata',
-    day: 'numeric',
     month: 'short',
-    year: 'numeric',
+    day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
     hour12: true,
-  });
-  return `${formatter.format(date)} IST`;
+  }).format(date);
+}
+
+export function formatTimeSlot(isoString: string): string {
+  const d = new Date(isoString);
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true,
+  }).format(d);
+}
+
+export function formatDateHeader(isoString: string): string {
+  const d = new Date(isoString);
+  return new Intl.DateTimeFormat('en-IN', {
+    timeZone: 'Asia/Kolkata',
+    weekday: 'short',
+    day: 'numeric',
+    month: 'short',
+  }).format(d);
 }

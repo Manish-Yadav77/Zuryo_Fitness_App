@@ -1,77 +1,151 @@
-import { useEffect, useState } from 'react';
-import { Bell, Check } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Bell, Check, CheckCheck } from 'lucide-react';
 import { notificationsApi } from '@/api/notifications.api';
 import type { AppNotification } from '@/types/notification';
 
 export function NotificationBell() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [open, setOpen] = useState(false);
+  const dropdownRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    notificationsApi.getMine().then(setNotifications).catch(console.error);
-    const interval = setInterval(() => {
-      notificationsApi.getMine().then(setNotifications).catch(console.error);
-    }, 10000); // Poll notifications every 10 seconds
-    return () => clearInterval(interval);
+    let isMounted = true;
+    const fetchNotifications = () => {
+      notificationsApi
+        .getMine()
+        .then((data) => {
+          if (isMounted) setNotifications(data || []);
+        })
+        .catch(console.error);
+    };
+
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 10000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
+
+  // Close dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    if (open) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [open]);
 
   const unreadCount = notifications.filter((n) => !n.readAt).length;
 
   async function handleMarkRead(id: string) {
-    await notificationsApi.markRead(id);
-    setNotifications((prev) =>
-      prev.map((n) => (n._id === id ? { ...n, readAt: new Date().toISOString() } : n)),
-    );
+    try {
+      await notificationsApi.markRead(id);
+      setNotifications((prev) =>
+        prev.map((n) =>
+          n._id === id ? { ...n, readAt: new Date().toISOString() } : n
+        )
+      );
+    } catch (err) {
+      console.error(err);
+    }
+  }
+
+  async function handleMarkAllRead() {
+    const unread = notifications.filter((n) => !n.readAt);
+    if (unread.length === 0) return;
+
+    try {
+      await Promise.all(unread.map((n) => notificationsApi.markRead(n._id)));
+      const now = new Date().toISOString();
+      setNotifications((prev) =>
+        prev.map((n) => ({ ...n, readAt: n.readAt || now }))
+      );
+    } catch (err) {
+      console.error(err);
+    }
   }
 
   return (
-    <div className="relative">
+    <div className="relative" ref={dropdownRef}>
       <button
         type="button"
         onClick={() => setOpen((s) => !s)}
-        className="relative rounded-xl p-2 text-slate-600 hover:bg-slate-100"
+        className="relative rounded-xl p-2 text-slate-600 transition hover:bg-slate-100 hover:text-slate-900"
         aria-label="Open notifications"
+        aria-expanded={open}
       >
         <Bell className="h-5 w-5" />
         {unreadCount > 0 && (
-          <span className="absolute right-1 top-1 flex h-4 w-4 items-center justify-center rounded-full bg-rose-500 text-[10px] font-bold text-white">
-            {unreadCount}
+          <span className="absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white shadow-2xs">
+            {unreadCount > 99 ? '99+' : unreadCount}
           </span>
         )}
       </button>
 
       {open && (
-        <div className="absolute right-0 mt-2 w-80 rounded-2xl bg-white p-4 shadow-xl ring-1 ring-slate-200 z-50">
-          <div className="flex items-center justify-between border-b border-slate-100 pb-2">
-            <h3 className="font-semibold text-slate-900 text-sm">Notifications</h3>
-            <span className="text-xs text-slate-500">{unreadCount} unread</span>
+        <div className="absolute right-0 z-50 mt-2 w-80 rounded-2xl bg-white p-4 shadow-xl ring-1 ring-slate-200/80">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-bold text-slate-900">Notifications</h3>
+              {unreadCount > 0 && (
+                <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-bold text-rose-600">
+                  {unreadCount} new
+                </span>
+              )}
+            </div>
+            {unreadCount > 0 && (
+              <button
+                type="button"
+                onClick={handleMarkAllRead}
+                className="flex items-center gap-1 text-[11px] font-semibold text-emerald-600 transition hover:text-emerald-700"
+              >
+                <CheckCheck className="h-3.5 w-3.5" />
+                <span>Mark all read</span>
+              </button>
+            )}
           </div>
 
-          <div className="mt-2 max-h-64 space-y-2 overflow-y-auto">
+          <div className="mt-2.5 max-h-72 space-y-2 overflow-y-auto pr-0.5">
             {notifications.length === 0 ? (
-              <p className="py-4 text-center text-xs text-slate-400">No notifications yet.</p>
+              <p className="py-6 text-center text-xs text-slate-400">
+                No notifications yet.
+              </p>
             ) : (
               notifications.map((n) => (
                 <div
                   key={n._id}
-                  className={`flex items-start justify-between rounded-xl p-2.5 text-xs transition ${
-                    n.readAt ? 'bg-slate-50 text-slate-500' : 'bg-emerald-50/60 text-slate-900 font-medium'
+                  className={`flex items-start justify-between gap-2 rounded-xl p-2.5 text-xs transition ${
+                    n.readAt
+                      ? 'bg-slate-50 text-slate-500'
+                      : 'bg-emerald-50/60 font-medium text-slate-900 ring-1 ring-emerald-500/10'
                   }`}
                 >
-                  <div>
-                    <p>{n.message}</p>
-                    <span className="mt-1 block text-[10px] text-slate-400">
-                      {new Date(n.createdAt).toLocaleTimeString()}
+                  <div className="space-y-1">
+                    <p className="leading-snug">{n.message}</p>
+                    <span className="block text-[10px] text-slate-400">
+                      {new Date(n.createdAt).toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      })}
                     </span>
                   </div>
                   {!n.readAt && (
                     <button
                       type="button"
                       onClick={() => handleMarkRead(n._id)}
-                      className="ml-2 text-emerald-600 hover:text-emerald-800"
+                      className="mt-0.5 shrink-0 text-emerald-600 transition hover:text-emerald-800"
                       title="Mark read"
                     >
-                      <Check className="h-3.5 w-3.5" />
+                      <Check className="h-4 w-4" />
                     </button>
                   )}
                 </div>

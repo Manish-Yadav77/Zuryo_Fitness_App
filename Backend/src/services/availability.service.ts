@@ -2,6 +2,7 @@ import { TrainerProfile } from '../models/TrainerProfile.js';
 import type { WeeklySlot } from '../models/TrainerProfile.js';
 import { parseTimeToMinutes } from './time.js';
 import { AppError } from '../utils/AppError.js';
+import { Booking } from '../models/Booking.js';
 
 export async function getTrainerProfileByUserId(userId: string) {
   let profile = await TrainerProfile.findOne({ userId });
@@ -54,6 +55,8 @@ export async function addTimeOffBlock(userId: string, from: Date, to: Date, reas
   if (from >= to) {
     throw new AppError(400, 'INVALID_TIME_RANGE', 'Time-off start date must be before end date');
   }
+  const conflict = await Booking.exists({ trainerId: userId, status: { $in: ['PENDING_PAYMENT', 'CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS'] }, startAt: { $lt: to }, endAt: { $gt: from } });
+  if (conflict) throw new AppError(409, 'BOOKING_CONFLICT', 'This time off overlaps an assigned booking');
 
   const profile = await TrainerProfile.findOneAndUpdate(
     { userId },

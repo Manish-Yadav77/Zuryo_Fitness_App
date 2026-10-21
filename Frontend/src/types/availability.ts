@@ -1,22 +1,14 @@
 export interface TimeSlotOption {
   startAt: string;
   endAt: string;
-  label: string;
   availableTrainersCount: number;
-  isPeak: boolean;
+  hasPreferredTrainer: boolean;
 }
 
-export interface CandidateEvaluation {
+export interface EligibleTrainerInfo {
   trainerId: string;
-  trainerName: string;
-  distanceKm: number;
-  sessionsToday: number;
+  name: string;
   rating: number;
-  eligible: boolean;
-  reason?: string;
-}
-
-export interface EligibleTrainersResponse {
-  candidates: CandidateEvaluation[];
-  chosenTrainerId?: string;
+  bio?: string;
+  distanceKm: number;
 }

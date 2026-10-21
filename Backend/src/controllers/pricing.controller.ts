@@ -7,6 +7,11 @@ const updatePricingSchema = z.object({
   normalPaise: z.number().min(100),
   peakPaise: z.number().min(100),
   commissionPercent: z.number().min(0).max(100),
+  peakWindows: z.array(z.object({
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1),
+    startMinute: z.number().int().min(0).max(1439),
+    endMinute: z.number().int().min(1).max(1440),
+  }).refine((window) => window.startMinute < window.endMinute, 'Peak window start must be before end')).min(1),
 });
 
 export const getConfig: RequestHandler = async (_req, res) => {

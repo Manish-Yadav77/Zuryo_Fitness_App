@@ -97,6 +97,12 @@ export const getRecordByBooking: RequestHandler = async (req, res) => {
   res.json({ record });
 };
 
+export const getMyRecords: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const records = await SessionRecord.find({ customerId: req.auth.id }).sort({ createdAt: -1 });
+  res.json({ records });
+};
+
 export const getAiRecommendation: RequestHandler = async (req, res) => {
   if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
   const recommendation = await generateWorkoutRecommendation(req.auth.id);

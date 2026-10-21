@@ -5,9 +5,18 @@
     -webkit-tap-highlight-color: transparent;
   }
   body {
-    background-color: #f8fafc;
+    background:
+      radial-gradient(circle at 0% 0%, rgba(16, 185, 129, .12), transparent 30rem),
+      radial-gradient(circle at 100% 5%, rgba(14, 165, 233, .10), transparent 27rem),
+      #f8fafc;
     color: #0f172a;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
+  ::selection { background: #a7f3d0; color: #064e3b; }
+}
+
+@layer components {
+  .page-title { @apply text-3xl font-black tracking-tight text-slate-950 sm:text-4xl; }
+  .page-kicker { @apply text-xs font-bold uppercase tracking-[.16em] text-emerald-700; }
 }

@@ -26,34 +26,32 @@ export interface SelectionResult {
 export function rankCandidates(
   candidates: EvaluatedCandidate[],
   preferredTrainerId?: string,
-): SelectionResult {
-  const eligibleCandidates = candidates.filter((c) => c.eligible);
-
-  if (eligibleCandidates.length === 0) {
-    return { candidates, preferredHonored: false };
-  }
+): { chosenId?: string; chosenTrainerId?: string; preferredHonored: boolean } {
+  const eligible = candidates.filter((c) => c.eligible);
+  if (eligible.length === 0) return { preferredHonored: false };
 
   if (preferredTrainerId) {
-    const pref = eligibleCandidates.find((c) => c.trainerId === preferredTrainerId);
+    const pref = eligible.find((c) => c.trainerId === preferredTrainerId);
     if (pref) {
       return {
-        candidates,
+        chosenId: pref.trainerId,
         chosenTrainerId: pref.trainerId,
         preferredHonored: true,
       };
     }
   }
 
-  const sorted = [...eligibleCandidates].sort((a, b) => {
+  eligible.sort((a, b) => {
     if (a.distanceKm !== b.distanceKm) return a.distanceKm - b.distanceKm;
     if (a.sessionsToday !== b.sessionsToday) return a.sessionsToday - b.sessionsToday;
-    if (a.rating !== b.rating) return b.rating - a.rating;
+    if (b.rating !== a.rating) return b.rating - a.rating;
     return a.trainerId.localeCompare(b.trainerId);
   });
 
+  const chosen = eligible[0]?.trainerId;
   return {
-    candidates,
-    chosenTrainerId: sorted[0]?.trainerId,
+    chosenId: chosen,
+    chosenTrainerId: chosen,
     preferredHonored: false,
   };
 }
@@ -64,20 +62,15 @@ export async function findBestTrainerForSlot(
   preferredTrainerId?: string,
 ): Promise<SelectionResult> {
   const society = await Society.findById(societyId);
-  if (!society) {
-    return { candidates: [], preferredHonored: false };
-  }
+  if (!society) return { candidates: [], preferredHonored: false };
 
   const trainers = await TrainerProfile.find({ zoneIds: society.zoneId, isActive: true });
   const atoms = getSessionAtoms(slotStart);
 
-  const { weekday, minutes: startM } = getIstWeekdayAndMinutes(slotStart);
-  const endM = startM + 60;
-
   const startOfDay = new Date(slotStart);
-  startOfDay.setUTCHours(0, 0, 0, 0);
+  startOfDay.setHours(0, 0, 0, 0);
   const endOfDay = new Date(slotStart);
-  endOfDay.setUTCHours(23, 59, 59, 999);
+  endOfDay.setHours(23, 59, 59, 999);
 
   const evaluated: EvaluatedCandidate[] = [];
 
@@ -100,11 +93,14 @@ export async function findBestTrainerForSlot(
     let eligible = true;
     let reason: string | undefined;
 
+    const { weekday, minutes } = getIstWeekdayAndMinutes(slotStart);
+    const endMinutes = minutes + 60;
+
     const covers = t.weeklyAvailability.some((w) => {
       if (w.weekday !== weekday) return false;
       const wStart = parseTimeToMinutes(w.start);
       const wEnd = parseTimeToMinutes(w.end);
-      return startM >= wStart && endM <= wEnd;
+      return minutes >= wStart && endMinutes <= wEnd;
     });
 
     if (!covers) {
@@ -113,8 +109,7 @@ export async function findBestTrainerForSlot(
     }
 
     if (eligible) {
-      const slotEnd = new Date(slotStart.getTime() + 60 * 60 * 1000);
-      const isOff = t.timeOff.some((to) => slotStart < to.to && slotEnd > to.from);
+      const isOff = t.timeOff.some((to) => slotStart >= to.from && slotStart < to.to);
       if (isOff) {
         eligible = false;
         reason = 'On time off';
@@ -143,5 +138,11 @@ export async function findBestTrainerForSlot(
     });
   }
 
-  return rankCandidates(evaluated, preferredTrainerId);
+  const { chosenTrainerId, preferredHonored } = rankCandidates(evaluated, preferredTrainerId);
+
+  return {
+    candidates: evaluated,
+    chosenTrainerId,
+    preferredHonored,
+  };
 }

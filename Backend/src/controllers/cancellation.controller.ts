@@ -17,8 +17,8 @@ export const postCancelBooking: RequestHandler = async (req, res) => {
   if (!id || typeof id !== 'string') throw new AppError(400, 'MISSING_ID', 'Booking ID required');
   const { reason } = cancelSchema.parse(req.body);
 
-  const booking = await cancelBooking(id, req.auth.id, reason);
-  res.json({ booking });
+  const result = await cancelBooking(id, req.auth.id, reason);
+  res.json(result);
 };
 
 export const postRescheduleBooking: RequestHandler = async (req, res) => {

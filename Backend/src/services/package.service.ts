@@ -10,14 +10,8 @@ function isDuplicateKey(err: unknown): boolean {
   return typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
 }
 
-export async function getActivePackagesForCustomer(customerId: string) {
-  const now = new Date();
-  const packages = await CustomerPackage.find({
-    customerId,
-    expiresAt: { $gte: now },
-  }).sort({ expiresAt: 1 });
-
-  return packages.filter((p) => p.usedSessions < p.totalSessions);
+export async function getPackagesForCustomer(customerId: string) {
+  return CustomerPackage.find({ customerId }).sort({ expiresAt: 1 });
 }
 
 /**
@@ -56,49 +50,32 @@ export async function fulfilPackagePurchase(payment: HydratedDocument<IPayment>)
   }
 }
 
-// NOTE: rewritten with atomic updates and wired to bookings in Phase 13.
-export async function deductPackageSession(packageId: string, bookingId: string) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
+/** Atomically consumes one credit, choosing the soonest-expiring usable package by default. */
+export async function consumePackageForBooking(
+  customerId: string,
+  bookingId: string,
+  session: mongoose.ClientSession,
+  requestedPackageId?: string,
+) {
+  const now = new Date();
+  const eligibility = {
+    customerId,
+    expiresAt: { $gt: now },
+    $expr: { $lt: ['$usedSessions', '$totalSessions'] },
+  };
+  const filter = requestedPackageId ? { ...eligibility, _id: requestedPackageId } : eligibility;
+  const pkg = await CustomerPackage.findOneAndUpdate(filter, { $inc: { usedSessions: 1 } }, {
+    session,
+    sort: { expiresAt: 1 },
+    returnDocument: 'after',
+  });
+  if (!pkg) throw new AppError(409, 'PACKAGE_UNAVAILABLE', 'No usable package credit is available');
 
   try {
-    const pkg = await CustomerPackage.findById(packageId).session(session);
-    if (!pkg) throw new AppError(404, 'NOT_FOUND', 'Package not found');
-
-    if (pkg.usedSessions >= pkg.totalSessions) {
-      throw new AppError(400, 'PACKAGE_EXHAUSTED', 'No remaining sessions in this package');
-    }
-
-    if (new Date() > pkg.expiresAt) {
-      throw new AppError(400, 'PACKAGE_EXPIRED', 'This package has expired');
-    }
-
-    await PackageLedger.create(
-      [
-        {
-          packageId,
-          bookingId,
-          type: 'CONSUME',
-          sessionsCount: 1,
-        },
-      ],
-      { session },
-    );
-
-    pkg.usedSessions += 1;
-    await pkg.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
-
-    return pkg;
+    await PackageLedger.create([{ packageId: pkg._id, bookingId, type: 'CONSUME', sessionsCount: 1 }], { session });
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-
-    if (isDuplicateKey(err)) {
-      throw new AppError(409, 'ALREADY_DEDUCTED', 'Session already deducted for this booking');
-    }
+    if (isDuplicateKey(err)) throw new AppError(409, 'ALREADY_DEDUCTED', 'This booking already used a package credit');
     throw err;
   }
+  return pkg;
 }

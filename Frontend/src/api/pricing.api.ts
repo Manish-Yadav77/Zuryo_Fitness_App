@@ -10,6 +10,7 @@ export const pricingApi = {
     normalPaise: number;
     peakPaise: number;
     commissionPercent: number;
+    peakWindows: PricingConfig['peakWindows'];
   }): Promise<PricingConfig> {
     const { data } = await api.put<{ config: PricingConfig }>('/pricing/config', payload);
     return data.config;

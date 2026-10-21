@@ -16,6 +16,7 @@ export interface SessionRecord {
   suggestedNextWorkout?: string;
   customerRating?: number;
   customerFeedback?: string;
+  createdAt?: string;
 }
 
 export interface AiWorkoutRecommendation {
@@ -25,4 +26,7 @@ export interface AiWorkoutRecommendation {
   mainCircuit: { exercise: string; sets: number; reps: number }[];
   coolDown: string[];
   coachNote: string;
+  source: 'NVIDIA' | 'GEMINI' | 'RULES';
+  model: string;
+  latencyMs: number;
 }

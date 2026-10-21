@@ -8,10 +8,10 @@ import { findBestTrainerForSlot } from './assignment.service.js';
 import { ceilToAtom, getSessionAtoms } from './time.js';
 import { AppError } from '../utils/AppError.js';
 import { formatIst } from '../utils/timeFormat.js';
+import { Payment } from '../models/Payment.js';
 
 const CANCELLATION_WINDOW_HOURS = 2;
 
-// NOTE: both functions are rewritten in Phase 14 (refunds, own-lock fix, rules).
 export async function cancelBooking(bookingId: string, userId: string, reason?: string) {
   const session = await mongoose.startSession();
   session.startTransaction();
@@ -24,16 +24,18 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
       throw new AppError(403, 'FORBIDDEN', 'You cannot cancel this booking');
     }
 
-    if (['CANCELLED', 'COMPLETED'].includes(booking.status)) {
+    if (['CANCELLED', 'COMPLETED', 'IN_PROGRESS'].includes(booking.status)) {
       throw new AppError(400, 'INVALID_STATUS', `Cannot cancel a ${booking.status.toLowerCase()} booking`);
     }
 
     const now = new Date();
+    const previousStatus = booking.status;
     const hoursUntilStart = (booking.startAt.getTime() - now.getTime()) / (1000 * 60 * 60);
 
+    const eligibleForRefund = hoursUntilStart >= CANCELLATION_WINDOW_HOURS || userId === booking.trainerId;
     let restoreCredit = false;
     if (booking.paymentMode === 'PACKAGE' && booking.packageId) {
-      if (hoursUntilStart >= CANCELLATION_WINDOW_HOURS || userId === booking.trainerId) {
+      if (eligibleForRefund) {
         restoreCredit = true;
       }
     }
@@ -61,6 +63,18 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
     booking.cancelReason = reason ?? 'Cancelled by user';
     await booking.save({ session });
 
+    let refunded = false;
+    if (booking.paymentMode === 'PAYMENT' && eligibleForRefund && previousStatus !== 'PENDING_PAYMENT') {
+      const payment = await Payment.findOne({ bookingId: booking._id, status: 'PAID' }).session(session);
+      if (payment) {
+        payment.status = 'REFUNDED';
+        payment.refundedAt = now;
+        payment.refundId = `demo_refund_${payment._id.toString()}`;
+        await payment.save({ session });
+        refunded = true;
+      }
+    }
+
     await session.commitTransaction();
     session.endSession();
 
@@ -78,7 +92,7 @@ export async function cancelBooking(bookingId: string, userId: string, reason?: 
       booking._id.toString(),
     );
 
-    return booking;
+    return { booking, outcome: { refunded, creditRestored: restoreCredit, eligibleForRefund } };
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
@@ -97,10 +111,16 @@ export async function rescheduleBooking(bookingId: string, customerId: string, n
   if (booking.status !== 'CONFIRMED') {
     throw new AppError(400, 'INVALID_STATUS', 'Only confirmed bookings can be rescheduled');
   }
+  if (booking.rescheduleCount >= 2) throw new AppError(409, 'RESCHEDULE_LIMIT', 'A booking can be rescheduled at most twice');
+  if (booking.startAt.getTime() - Date.now() < CANCELLATION_WINDOW_HOURS * 60 * 60 * 1000) {
+    throw new AppError(409, 'RESCHEDULE_WINDOW', 'Reschedule at least 2 hours before the session');
+  }
 
   const roundedStart = ceilToAtom(newStartAt);
   const roundedEnd = new Date(roundedStart.getTime() + 60 * 60 * 1000);
 
+  // Remove this booking's own locks before ranking so a short shift is not falsely considered busy.
+  await SlotLock.deleteMany({ bookingId: booking._id });
   const selection = await findBestTrainerForSlot(
     booking.societyId.toString(),
     roundedStart,
@@ -108,6 +128,8 @@ export async function rescheduleBooking(bookingId: string, customerId: string, n
   );
 
   if (!selection.chosenTrainerId) {
+    // Restore the original locks when no candidate is available.
+    await SlotLock.insertMany(getSessionAtoms(booking.startAt).map((atom) => ({ trainerId: booking.trainerId, atomStart: atom, bookingId: booking._id, state: 'CONFIRMED' as const })));
     throw new AppError(409, 'NO_TRAINER_AVAILABLE', 'No trainer available for the requested new time.');
   }
 
@@ -115,8 +137,6 @@ export async function rescheduleBooking(bookingId: string, customerId: string, n
   session.startTransaction();
 
   try {
-    await SlotLock.deleteMany({ bookingId: booking._id }, { session });
-
     const newAtoms = getSessionAtoms(roundedStart);
     const locks = newAtoms.map((atom) => ({
       trainerId: selection.chosenTrainerId!,
@@ -136,12 +156,15 @@ export async function rescheduleBooking(bookingId: string, customerId: string, n
     await session.commitTransaction();
     session.endSession();
 
-    await sendNotification(
-      booking.trainerId,
+    await Promise.all([
+      sendNotification(
+      booking.customerId,
       'BOOKING_RESCHEDULED',
-      `Session rescheduled to ${formatIst(roundedStart)}.`,
+      `Your session has been rescheduled to ${formatIst(roundedStart)}.`,
       booking._id.toString(),
-    );
+      ),
+      sendNotification(booking.trainerId, 'BOOKING_RESCHEDULED', `Session rescheduled to ${formatIst(roundedStart)}.`, booking._id.toString()),
+    ]);
 
     return booking;
   } catch (err) {

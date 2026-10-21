@@ -6,6 +6,9 @@ import { PackageTemplate } from '../models/PackageTemplate.js';
 import { Payment } from '../models/Payment.js';
 import type { PaymentPurpose } from '../models/Payment.js';
 import { fulfilPackagePurchase } from './package.service.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { sendNotification } from './notification.service.js';
+import { formatIst } from '../utils/timeFormat.js';
 import { AppError } from '../utils/AppError.js';
 
 /** Razorpay signature = HMAC-SHA256(secret, "orderId|paymentId"), hex encoded. */
@@ -118,8 +121,15 @@ async function fulfilPayment(payment: InstanceType<typeof Payment>) {
   }
 
   if (payment.bookingId) {
-    // Phase 13 turns this into the real "unpaid hold becomes confirmed" step.
-    await Booking.updateOne({ _id: payment.bookingId, status: 'PENDING_PAYMENT' }, { $set: { status: 'CONFIRMED' } });
+    const now = new Date();
+    const booking = await Booking.findOneAndUpdate(
+      { _id: payment.bookingId, status: 'PENDING_PAYMENT', holdExpiresAt: { $gt: now } },
+      { $set: { status: 'CONFIRMED' }, $unset: { holdExpiresAt: 1 } },
+      { returnDocument: 'after' },
+    );
+    if (!booking) throw new AppError(409, 'HOLD_EXPIRED', 'This payment hold expired. Please make a new booking.');
+    await SlotLock.updateMany({ bookingId: booking._id, state: 'HELD' }, { $set: { state: 'CONFIRMED' }, $unset: { holdExpiresAt: 1 } });
+    await sendNotification(booking.trainerId, 'BOOKING_ASSIGNED', `New workout session assigned for ${formatIst(booking.startAt)}.`, booking._id.toString());
   }
   return { payment, package: null };
 }
@@ -162,5 +172,13 @@ export async function verifyPayment(customerId: string, input: VerifyInput) {
     throw new AppError(409, 'INVALID_STATUS', 'This payment could not be verified');
   }
 
-  return fulfilPayment(claimed);
+  try {
+    return await fulfilPayment(claimed);
+  } catch (err) {
+    // The order has a verified payment but its booking hold is no longer usable. Preserve the audit trail.
+    if (err instanceof AppError && err.code === 'HOLD_EXPIRED') {
+      await Payment.updateOne({ _id: claimed._id }, { $set: { status: 'FAILED' } });
+    }
+    throw err;
+  }
 }

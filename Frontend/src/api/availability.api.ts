@@ -1,10 +1,10 @@
 import { api } from './client';
-import type { EligibleTrainersResponse, TimeSlotOption } from '@/types/availability';
+import type { EligibleTrainerInfo, TimeSlotOption } from '@/types/availability';
 
 export const availabilityApi = {
-  async getForDate(societyId: string, dateStr: string): Promise<TimeSlotOption[]> {
-    const { data } = await api.get<{ slots: TimeSlotOption[] }>('/availability', {
-      params: { societyId, date: dateStr },
+  async getDaySlots(societyId: string, dateStr: string, preferredTrainerId?: string): Promise<TimeSlotOption[]> {
+    const { data } = await api.get<{ slots: TimeSlotOption[] }>('/availability/slots', {
+      params: { societyId, date: dateStr, preferredTrainerId },
     });
     return data.slots;
   },
@@ -14,10 +14,10 @@ export const availabilityApi = {
     });
     return data.options;
   },
-  async getEligibleTrainers(societyId: string, startAtIso: string): Promise<EligibleTrainersResponse> {
-    const { data } = await api.get<EligibleTrainersResponse>('/availability/trainers', {
+  async getEligibleTrainers(societyId: string, startAtIso: string): Promise<EligibleTrainerInfo[]> {
+    const { data } = await api.get<{ trainers: EligibleTrainerInfo[] }>('/availability/trainers', {
       params: { societyId, startAt: startAtIso },
     });
-    return data;
+    return data.trainers;
   },
 };

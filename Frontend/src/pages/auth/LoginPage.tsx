@@ -1,62 +1,65 @@
-import { useState } from 'react'
-import type { FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
-import { Eye, EyeOff } from 'lucide-react'
-import { useAuth } from '@/hooks/useAuth'
-import { parseApiError } from '@/api/client'
-import { loginSchema, zodFieldErrors } from '@/lib/validation'
-import type { FieldErrors } from '@/lib/validation'
-import { roleHome } from '@/config/nav'
-import { AuthLayout } from '@/components/auth/AuthLayout'
-import { Alert } from '@/components/ui/Alert'
-import { Button } from '@/components/ui/Button'
-import { Input } from '@/components/ui/Input'
+import { useState } from 'react';
+import type { FormEvent } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
+import { Eye, EyeOff, KeyRound } from 'lucide-react';
+import { useAuth } from '@/hooks/useAuth';
+import { parseApiError } from '@/api/client';
+import { loginSchema, zodFieldErrors } from '@/lib/validation';
+import type { FieldErrors } from '@/lib/validation';
+import { roleHome } from '@/config/nav';
+import { AuthLayout } from '@/components/auth/AuthLayout';
+import { Alert } from '@/components/ui/Alert';
+import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
 
 // Demo accounts created by `npm run seed` in the backend (synthetic data only).
-const DEMO_PASSWORD = 'Demo@12345'
+const DEMO_PASSWORD = 'Demo@12345';
 const DEMO_ACCOUNTS = [
   { label: 'Customer', email: 'customer@demo.test' },
   { label: 'Trainer', email: 'trainer1@demo.test' },
   { label: 'Admin', email: 'admin@demo.test' },
-]
+];
 
 export default function LoginPage() {
-  const { login } = useAuth()
-  const navigate = useNavigate()
+  const { login } = useAuth();
+  const navigate = useNavigate();
 
-  const [email, setEmail] = useState('')
-  const [password, setPassword] = useState('')
-  const [showPassword, setShowPassword] = useState(false)
-  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({})
-  const [formError, setFormError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
 
   async function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault()
-    setFormError(null)
+    e.preventDefault();
+    setFormError(null);
 
-    const result = loginSchema.safeParse({ email, password })
+    const result = loginSchema.safeParse({ email, password });
     if (!result.success) {
-      setFieldErrors(zodFieldErrors(result.error))
-      return
+      setFieldErrors(zodFieldErrors(result.error));
+      return;
     }
-    setFieldErrors({})
+    setFieldErrors({});
 
-    setSubmitting(true)
+    setSubmitting(true);
     try {
-      const user = await login(result.data)
-      navigate(roleHome[user.role], { replace: true })
+      const user = await login(result.data);
+      navigate(roleHome[user.role], { replace: true });
     } catch (err) {
-      const parsed = parseApiError(err)
-      setFormError(parsed.message)
-      setFieldErrors(parsed.fieldErrors)
+      const parsed = parseApiError(err);
+      setFormError(parsed.message);
+      setFieldErrors(parsed.fieldErrors);
     } finally {
-      setSubmitting(false)
+      setSubmitting(false);
     }
   }
 
   return (
-    <AuthLayout title="Welcome back" subtitle="Log in to book sessions and track your fitness journey.">
+    <AuthLayout
+      title="Welcome back"
+      subtitle="Log in to book sessions and track your fitness journey."
+    >
       <form onSubmit={handleSubmit} noValidate className="space-y-5">
         {formError && <Alert tone="error">{formError}</Alert>}
 
@@ -84,34 +87,44 @@ export default function LoginPage() {
             <button
               type="button"
               onClick={() => setShowPassword((s) => !s)}
-              className="rounded-lg p-1.5 text-slate-400 hover:text-slate-600"
+              className="rounded-lg p-1.5 text-slate-400 transition hover:text-slate-600"
               aria-label={showPassword ? 'Hide password' : 'Show password'}
             >
-              {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              {showPassword ? (
+                <EyeOff className="h-4 w-4" />
+              ) : (
+                <Eye className="h-4 w-4" />
+              )}
             </button>
           }
         />
 
-        <Button type="submit" fullWidth loading={submitting}>
+        <Button type="submit" fullWidth loading={submitting} className="py-2.5 font-bold">
           Log in
         </Button>
       </form>
 
-      <div className="mt-8 rounded-2xl bg-slate-100/70 p-4 ring-1 ring-slate-200">
-        <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Demo accounts</p>
-        <p className="mt-1 text-xs text-slate-500">Click to fill the form, then press Log in.</p>
+      {/* Demo Accounts Card */}
+      <div className="mt-8 rounded-2xl bg-slate-50 p-4 ring-1 ring-slate-200/80">
+        <div className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wider text-slate-500">
+          <KeyRound className="h-3.5 w-3.5 text-slate-400" />
+          <span>Demo Accounts</span>
+        </div>
+        <p className="mt-1 text-xs text-slate-500">
+          Click a role to auto-fill credentials, then press Log in.
+        </p>
         <div className="mt-3 flex flex-wrap gap-2">
           {DEMO_ACCOUNTS.map((acc) => (
             <button
               key={acc.email}
               type="button"
               onClick={() => {
-                setEmail(acc.email)
-                setPassword(DEMO_PASSWORD)
-                setFieldErrors({})
-                setFormError(null)
+                setEmail(acc.email);
+                setPassword(DEMO_PASSWORD);
+                setFieldErrors({});
+                setFormError(null);
               }}
-              className="rounded-lg bg-white px-3 py-1.5 text-xs font-medium text-slate-700 ring-1 ring-inset ring-slate-300 transition hover:bg-emerald-50 hover:text-emerald-700 hover:ring-emerald-300"
+              className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 ring-1 ring-inset ring-slate-300 shadow-2xs transition hover:bg-emerald-50 hover:text-emerald-700 hover:ring-emerald-300"
             >
               {acc.label}
             </button>
@@ -119,12 +132,15 @@ export default function LoginPage() {
         </div>
       </div>
 
-      <p className="mt-8 text-center text-sm text-slate-500">
+      <p className="mt-8 text-center text-xs text-slate-500">
         New to Zuryo Fit?{' '}
-        <Link to="/signup" className="font-semibold text-emerald-700 hover:text-emerald-800">
+        <Link
+          to="/signup"
+          className="font-bold text-emerald-600 hover:text-emerald-700"
+        >
           Create an account
         </Link>
       </p>
     </AuthLayout>
-  )
+  );
 }
