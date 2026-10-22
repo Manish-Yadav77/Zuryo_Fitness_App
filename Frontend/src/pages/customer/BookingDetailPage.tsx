@@ -10,7 +10,6 @@ import {
   Star,
   Wallet,
   Receipt,
-  Check,
 } from 'lucide-react';
 import { bookingsApi } from '@/api/bookings.api';
 import type { Booking } from '@/types/booking';
