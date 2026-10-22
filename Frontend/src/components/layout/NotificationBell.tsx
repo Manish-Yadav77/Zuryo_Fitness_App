@@ -7,6 +7,48 @@ export function NotificationBell() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [open, setOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const isInitialFetch = useRef(true);
+  const previousIds = useRef<Set<string>>(new Set());
+
+  const playBuzzerSound = () => {
+    try {
+      const AudioContextClass =
+        window.AudioContext ||
+        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextClass) return;
+      const ctx = new AudioContextClass();
+
+      if (ctx.state === 'suspended') {
+        ctx.resume();
+      }
+
+      const now = ctx.currentTime;
+
+      const osc1 = ctx.createOscillator();
+      const gain1 = ctx.createGain();
+      osc1.type = 'sawtooth';
+      osc1.frequency.setValueAtTime(880, now);
+      gain1.gain.setValueAtTime(0.15, now);
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+      osc1.connect(gain1);
+      gain1.connect(ctx.destination);
+      osc1.start(now);
+      osc1.stop(now + 0.15);
+
+      const osc2 = ctx.createOscillator();
+      const gain2 = ctx.createGain();
+      osc2.type = 'sawtooth';
+      osc2.frequency.setValueAtTime(1174.66, now + 0.18);
+      gain2.gain.setValueAtTime(0.2, now + 0.18);
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.4);
+      osc2.connect(gain2);
+      gain2.connect(ctx.destination);
+      osc2.start(now + 0.18);
+      osc2.stop(now + 0.4);
+    } catch {
+      // Audio play can be silently blocked if user hasn't interacted with the page yet
+    }
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -14,7 +56,25 @@ export function NotificationBell() {
       notificationsApi
         .getMine()
         .then((data) => {
-          if (isMounted) setNotifications(data || []);
+          if (!isMounted) return;
+          const newNotifications = data || [];
+
+          if (isInitialFetch.current) {
+            isInitialFetch.current = false;
+            previousIds.current = new Set(newNotifications.map((n) => n._id));
+          } else {
+            const hasNewUnread = newNotifications.some(
+              (n) => !n.readAt && !previousIds.current.has(n._id)
+            );
+
+            if (hasNewUnread) {
+              playBuzzerSound();
+            }
+
+            previousIds.current = new Set(newNotifications.map((n) => n._id));
+          }
+
+          setNotifications(newNotifications);
         })
         .catch(console.error);
     };
@@ -28,7 +88,6 @@ export function NotificationBell() {
     };
   }, []);
 
-  // Close dropdown when clicking outside
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (dropdownRef.current && !dropdownRef.current.contains(e.target as Node)) {
