@@ -13,7 +13,7 @@ A working, deployed MVP for booking a 60-minute personal-training session with a
 | Live app (frontend) | https://zuryo-fitness.netlify.app/ |
 | Live API (backend) | https://zuryo-fitness-app.onrender.com/api (health check: `/api/health`) |
 | GitHub repository | https://github.com/Manish-Yadav77/Zuryo_Fitness_App |
-| Video walkthrough | `<PASTE YOUR VIDEO LINK HERE>` |
+| Video walkthrough | https://drive.google.com/file/d/1wxDh-vC9TAty_5eFy9P0ZOsHXw316YcI/view?usp=sharing |
 
 > **Cold start:** the backend is on a free Render instance, which sleeps after about 15 minutes without traffic and takes roughly 30–60 seconds to wake. If the first login is slow, open `/api/health` once and retry.
 
