@@ -8,6 +8,9 @@ import {
   ArrowLeft,
   CreditCard,
   Star,
+  Wallet,
+  Receipt,
+  Check,
 } from 'lucide-react';
 import { bookingsApi } from '@/api/bookings.api';
 import type { Booking } from '@/types/booking';
@@ -156,6 +159,9 @@ export default function BookingDetailPage() {
   }
 
   const canCancel = booking.status === 'CONFIRMED';
+  const isCancelled = booking.status === 'CANCELLED' || booking.status === 'EXPIRED';
+  const isPackage = booking.paymentMode === 'PACKAGE';
+  const totalVal = booking.priceSnapshot?.totalPaise || 0;
 
   const getStatusTone = (status: string) => {
     switch (status) {
@@ -189,8 +195,11 @@ export default function BookingDetailPage() {
           </h1>
           <p className="mt-0.5 text-xs font-mono text-slate-500">ID: {booking._id}</p>
         </div>
-        <div className="self-start sm:self-center">
+        <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
           <Badge tone={getStatusTone(booking.status)}>{booking.status}</Badge>
+          <Badge tone={isPackage ? 'sky' : 'emerald'}>
+            {isPackage ? 'Package Credit' : 'Direct Payment'}
+          </Badge>
         </div>
       </div>
 
@@ -296,17 +305,23 @@ export default function BookingDetailPage() {
         </div>
       </Card>
 
-      <Card className="mb-6 p-5 shadow-sm">
-        <div className="flex items-center gap-2 border-b border-slate-100 pb-3 mb-4">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
-            <CreditCard className="h-4 w-4" />
+      {/* Payment & Credit Breakdown Card */}
+      <Card className="mb-6 p-5 shadow-sm space-y-4">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+          <div className="flex items-center gap-2">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
+              <CreditCard className="h-4 w-4" />
+            </div>
+            <h2 className="text-base font-bold text-slate-900">Payment Breakdown</h2>
           </div>
-          <h2 className="text-base font-bold text-slate-900">Payment Breakdown</h2>
+          <Badge tone={isPackage ? 'sky' : 'emerald'}>
+            {isPackage ? 'Package Credit Redemption' : 'Razorpay Direct Payment'}
+          </Badge>
         </div>
 
         <div className="space-y-2.5 text-xs text-slate-600">
           <div className="flex justify-between">
-            <span>Session Fee</span>
+            <span>Session Base Fee</span>
             <span className="font-medium text-slate-900">
               {formatPaise(booking.priceSnapshot?.sessionPaise || 0)}
             </span>
@@ -319,11 +334,42 @@ export default function BookingDetailPage() {
               {formatPaise(booking.priceSnapshot?.commissionPaise || 0)}
             </span>
           </div>
-          <div className="flex justify-between border-t border-slate-100 pt-3 text-sm font-bold text-slate-900">
-            <span>Total Amount Paid</span>
-            <span className="text-emerald-700">
-              {formatPaise(booking.priceSnapshot?.totalPaise || 0)}
-            </span>
+          <div className="flex justify-between border-t border-slate-100 pt-2 font-semibold text-slate-700">
+            <span>Session Monetary Value</span>
+            <span>{formatPaise(totalVal)}</span>
+          </div>
+
+          {/* Checkout Charged Amount */}
+          <div className="flex items-center justify-between rounded-xl bg-slate-50 p-3 border border-slate-200/80 text-sm font-bold text-slate-900">
+            <div>
+              <span className="block text-xs font-bold text-slate-700">
+                Total Charged at Checkout
+              </span>
+              <span className="text-[11px] font-normal text-slate-500">
+                {isCancelled
+                  ? isPackage
+                    ? '1 Package Credit Restored to Balance'
+                    : 'Cash Payment Refunded'
+                  : isPackage
+                  ? '1 Package Credit Used'
+                  : 'Paid via Razorpay Direct'}
+              </span>
+            </div>
+            <div className="text-right">
+              {isCancelled ? (
+                <span className="text-rose-600">₹0.00</span>
+              ) : isPackage ? (
+                <div className="flex items-center gap-1 text-sky-700">
+                  <Wallet className="h-4 w-4" />
+                  <span>₹0.00</span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1 text-emerald-700">
+                  <Receipt className="h-4 w-4" />
+                  <span>{formatPaise(totalVal)}</span>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </Card>

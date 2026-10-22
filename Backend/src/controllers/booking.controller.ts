@@ -6,6 +6,7 @@ import { createBooking } from '../services/booking.service.js';
 import { CustomerProfile } from '../models/CustomerProfile.js';
 import { User } from '../models/User.js';
 import { SessionRecord } from '../models/SessionRecord.js';
+import { Payment } from '../models/Payment.js';
 import { AppError } from '../utils/AppError.js';
 import { requireObjectId } from '../utils/ids.js';
 import { assertCanViewBooking } from '../utils/ownership.js';
@@ -94,8 +95,11 @@ export const getAssignedBookings: RequestHandler = async (req, res) => {
 };
 
 export const getAllBookingsAdmin: RequestHandler = async (_req, res) => {
-  const bookings = await Booking.find({}).populate('societyId').sort({ createdAt: -1 });
-  res.json({ bookings });
+  const [bookings, payments] = await Promise.all([
+    Booking.find({}).populate('societyId').sort({ createdAt: -1 }),
+    Payment.find({ status: 'PAID' }).sort({ createdAt: -1 }),
+  ]);
+  res.json({ bookings, payments });
 };
 
 export const getAssignmentDecisionsAdmin: RequestHandler = async (_req, res) => {

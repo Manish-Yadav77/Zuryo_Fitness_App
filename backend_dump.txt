@@ -1,0 +1,4557 @@
+﻿
+===== FILE: Backend\src\config\db.ts =====
+import mongoose from 'mongoose';
+import { env } from './env.js';
+
+export async function connectDb(): Promise<void> {
+  mongoose.set('strictQuery', true);
+  await mongoose.connect(env.MONGODB_URI, { serverSelectionTimeoutMS: 10_000 });
+  console.log('MongoDB connected');
+}
+
+export async function disconnectDb(): Promise<void> {
+  await mongoose.disconnect();
+}
+
+===== FILE: Backend\src\config\env.ts =====
+import { z } from 'zod';
+
+const envSchema = z
+  .object({
+    NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
+    PORT: z.coerce.number().int().positive().default(5000),
+    MONGODB_URI: z.string().min(1, 'MONGODB_URI is required'),
+    JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
+    JWT_EXPIRES_IN_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 12),
+    CLIENT_ORIGIN: z.string().min(1).default('http://localhost:5173'),
+    SEED_PASSWORD: z.string().min(8).default('Demo@12345'),
+
+    RAZORPAY_KEY_ID: z.string().optional(),
+    RAZORPAY_KEY_SECRET: z.string().optional(),
+
+    LLM_API_KEY: z.string().optional(),
+    LLM_MODEL: z.string().default('gemini-3.8-flash'),
+    NVIDIA_API_KEY: z.string().optional(),
+    NVIDIA_MODEL: z.string().default('z-ai/glm-5.3-flash'),
+    NVIDIA_BASE_URL: z.string().default('https://integrate.api.nvidia.com/v1'),
+  })
+  .superRefine((value, ctx) => {
+    if (value.NODE_ENV === 'production' && (!value.RAZORPAY_KEY_ID || !value.RAZORPAY_KEY_SECRET)) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['RAZORPAY_KEY_ID'],
+        message: 'RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are required in production',
+      });
+    }
+  });
+
+const cleaned = Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== ''));
+
+const parsed = envSchema.safeParse(cleaned);
+
+if (!parsed.success) {
+  console.error('Invalid environment variables:');
+  for (const issue of parsed.error.issues) {
+    console.error(`  - ${issue.path.join('.')}: ${issue.message}`);
+  }
+  process.exit(1);
+}
+
+export const env = {
+  ...parsed.data,
+  clientOrigins: parsed.data.CLIENT_ORIGIN.split(',').map((o) => o.trim()).filter(Boolean),
+  isProduction: parsed.data.NODE_ENV === 'production',
+};
+
+===== FILE: Backend\src\config\network.ts =====
+import dns from 'node:dns';
+import net from 'node:net';
+
+// Windows/ISP IPv6 routing makes Node fetch hang on some APIs. Force IPv4 in code (no NODE_OPTIONS needed).
+dns.setDefaultResultOrder('ipv4first');
+net.setDefaultAutoSelectFamily(false);
+
+===== FILE: Backend\src\controllers\assessment.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { FITNESS_LEVELS } from '../models/FitnessAssessment.js';
+import { getLatestAssessment, saveAssessment } from '../services/assessment.service.js';
+import { AppError } from '../utils/AppError.js';
+
+const saveAssessmentSchema = z.object({
+  societyId: z.string().min(1, 'Please select your residential society'),
+  flatNumber: z.string().optional(),
+  phone: z.string().optional(),
+  age: z.number().int().min(10, 'Age must be at least 10').max(100, 'Enter a valid age'),
+  weightKg: z.number().min(20, 'Weight must be at least 20 kg').max(300, 'Enter a valid weight'),
+  goals: z.array(z.string()).min(1, 'Select at least one fitness goal'),
+  level: z.enum(FITNESS_LEVELS, { message: 'Select a valid experience level' }),
+  preferences: z.array(z.string()).default([]),
+  limitations: z.string().optional(),
+});
+
+export const getMyAssessment: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const data = await getLatestAssessment(req.auth.id);
+  res.json(data);
+};
+
+export const submitAssessment: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const body = saveAssessmentSchema.parse(req.body);
+  const assessment = await saveAssessment({ customerId: req.auth.id, ...body });
+  res.status(201).json({ assessment });
+};
+
+===== FILE: Backend\src\controllers\auth.controller.ts =====
+import type { RequestHandler } from 'express';
+import bcrypt from 'bcryptjs';
+import { z } from 'zod';
+import { User, toPublicUser } from '../models/User.js';
+import { AppError } from '../utils/AppError.js';
+import { signToken } from '../utils/jwt.js';
+
+const BCRYPT_ROUNDS = 12;
+// Used so a login for an unknown email takes about as long as a real one (prevents user enumeration by timing).
+const DUMMY_HASH = bcrypt.hashSync('not-a-real-password', BCRYPT_ROUNDS);
+
+const emailSchema = z.string().trim().toLowerCase().email('Enter a valid email address');
+
+const registerSchema = z.object({
+  name: z.string().trim().min(2, 'Name must be at least 2 characters').max(60, 'Name is too long'),
+  email: emailSchema,
+  password: z
+    .string()
+    .min(8, 'Password must be at least 8 characters')
+    .max(72, 'Password is too long')
+    .regex(/[A-Za-z]/, 'Password must include a letter')
+    .regex(/[0-9]/, 'Password must include a number'),
+});
+
+const loginSchema = z.object({
+  email: emailSchema,
+  password: z.string().min(1, 'Password is required').max(72),
+});
+
+/** Public signup. The role is ALWAYS customer. Trainers and admins are created by seed/admin only. */
+export const register: RequestHandler = async (req, res) => {
+  const { name, email, password } = registerSchema.parse(req.body);
+
+  const exists = await User.exists({ email });
+  if (exists) {
+    throw new AppError(409, 'EMAIL_TAKEN', 'An account with this email already exists', [
+      { path: 'email', message: 'This email is already registered' },
+    ]);
+  }
+
+  const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+  const user = await User.create({ name, email, passwordHash, role: 'customer' });
+
+  res.status(201).json({
+    token: signToken({ sub: user._id.toString(), role: user.role }),
+    user: toPublicUser(user),
+  });
+};
+
+export const login: RequestHandler = async (req, res) => {
+  const { email, password } = loginSchema.parse(req.body);
+
+  const user = await User.findOne({ email }).select('+passwordHash');
+  const ok = await bcrypt.compare(password, user?.passwordHash ?? DUMMY_HASH);
+
+  if (!user || !ok || !user.isActive) {
+    throw new AppError(401, 'INVALID_CREDENTIALS', 'Invalid email or password');
+  }
+
+  res.json({
+    token: signToken({ sub: user._id.toString(), role: user.role }),
+    user: toPublicUser(user),
+  });
+};
+
+export const me: RequestHandler = async (req, res) => {
+  const user = await User.findById(req.auth?.id);
+  if (!user || !user.isActive) {
+    throw new AppError(401, 'INVALID_TOKEN', 'Your session is no longer valid');
+  }
+  res.json({ user: toPublicUser(user) });
+};
+
+===== FILE: Backend\src\controllers\availability.controller.ts =====
+import type { RequestHandler } from 'express';
+import { getAvailableSlotsForDay, getEligibleTrainersForSlot, getInstantOptions } from '../services/slots.service.js';
+import { requireObjectId } from '../utils/ids.js';
+
+export const getDaySlots: RequestHandler = async (req, res) => {
+  const societyId = requireObjectId(req.query['societyId'], 'Society');
+  const dateStr = typeof req.query['date'] === 'string' ? req.query['date'] : new Date().toISOString();
+  const preferredTrainerId = typeof req.query['preferredTrainerId'] === 'string' ? req.query['preferredTrainerId'] : undefined;
+
+  const slots = await getAvailableSlotsForDay(societyId, dateStr, preferredTrainerId);
+  res.json({ slots });
+};
+
+export const getInstantSlotOptions: RequestHandler = async (req, res) => {
+  const societyId = requireObjectId(req.query['societyId'], 'Society');
+  const options = await getInstantOptions(societyId);
+  res.json({ options });
+};
+
+export const getEligibleTrainers: RequestHandler = async (req, res) => {
+  const societyId = requireObjectId(req.query['societyId'], 'Society');
+  const startAtStr = typeof req.query['startAt'] === 'string' ? req.query['startAt'] : '';
+  const startAt = new Date(startAtStr);
+
+  const trainers = await getEligibleTrainersForSlot(societyId, startAt);
+  res.json({ trainers });
+};
+
+===== FILE: Backend\src\controllers\booking.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { Booking } from '../models/Booking.js';
+import { AssignmentDecision } from '../models/AssignmentDecision.js';
+import { createBooking } from '../services/booking.service.js';
+import { CustomerProfile } from '../models/CustomerProfile.js';
+import { User } from '../models/User.js';
+import { SessionRecord } from '../models/SessionRecord.js';
+import { Payment } from '../models/Payment.js';
+import { AppError } from '../utils/AppError.js';
+import { requireObjectId } from '../utils/ids.js';
+import { assertCanViewBooking } from '../utils/ownership.js';
+
+const createBookingSchema = z.object({
+  societyId: z.string().min(1, 'Society selection is required'),
+  mode: z.enum(['INSTANT', 'SCHEDULED']),
+  startAt: z.string().datetime(),
+  preferredTrainerId: z.string().optional(),
+  paymentMode: z.enum(['PAYMENT', 'PACKAGE']).default('PAYMENT'),
+  packageId: z.string().optional(),
+});
+
+export const postBooking: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+
+  const idempotencyKey = req.headers['idempotency-key'] as string | undefined;
+  const body = createBookingSchema.parse(req.body);
+
+  const booking = await createBooking({
+    customerId: req.auth.id,
+    societyId: body.societyId,
+    mode: body.mode,
+    startAt: new Date(body.startAt),
+    preferredTrainerId: body.preferredTrainerId,
+    idempotencyKey,
+    paymentMode: body.paymentMode,
+    packageId: body.packageId,
+  });
+
+  res.status(201).json({ booking });
+};
+
+export const getMyBookings: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+
+  const bookings = await Booking.find({ customerId: req.auth.id }).populate('societyId').sort({ startAt: -1 });
+
+  res.json({ bookings });
+};
+
+export const getAssignedBookings: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+
+  const bookings = await Booking.find({ trainerId: req.auth.id }).populate('societyId').sort({ startAt: -1 }).lean();
+
+  const customerIds = [...new Set(bookings.map((b) => b.customerId))];
+  const bookingIds = bookings.map((b) => b._id);
+
+  const [profiles, users, records] = await Promise.all([
+    CustomerProfile.find({ userId: { $in: customerIds } }).lean(),
+    User.find({ _id: { $in: customerIds } }).select('name email').lean(),
+    SessionRecord.find({ bookingId: { $in: bookingIds } }).lean(),
+  ]);
+
+  const profileMap = new Map(profiles.map((p) => [p.userId, p]));
+  const userMap = new Map(users.map((u) => [u._id.toString(), u]));
+  const recordMap = new Map(records.map((r) => [r.bookingId.toString(), r]));
+
+  const enrichedBookings = bookings.map((b) => {
+    const profile = profileMap.get(b.customerId);
+    const user = userMap.get(b.customerId);
+    const record = recordMap.get(b._id.toString());
+
+    return {
+      ...b,
+      customerDetails: {
+        name: user?.name,
+        flatNumber: profile?.flatNumber,
+        phone: profile?.phone,
+      },
+      sessionRecord: record
+        ? {
+            durationMinutes: record.durationMinutes,
+            exercises: record.exercises,
+            trainerNotes: record.trainerNotes,
+            suggestedNextWorkout: record.suggestedNextWorkout,
+            customerRating: record.customerRating,
+            customerFeedback: record.customerFeedback,
+          }
+        : null,
+    };
+  });
+
+  res.json({ bookings: enrichedBookings });
+};
+
+export const getAllBookingsAdmin: RequestHandler = async (_req, res) => {
+  const [bookings, payments] = await Promise.all([
+    Booking.find({}).populate('societyId').sort({ createdAt: -1 }),
+    Payment.find({ status: 'PAID' }).sort({ createdAt: -1 }),
+  ]);
+  res.json({ bookings, payments });
+};
+
+export const getAssignmentDecisionsAdmin: RequestHandler = async (_req, res) => {
+  const decisions = await AssignmentDecision.find({}).populate('societyId').sort({ createdAt: -1 }).limit(50);
+  res.json({ decisions });
+};
+
+export const getBookingById: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+
+  const id = requireObjectId(req.params['id'], 'Booking');
+  const booking = await Booking.findById(id).populate('societyId');
+  if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+
+  assertCanViewBooking(booking, req.auth);
+
+  res.json({ booking });
+};
+
+===== FILE: Backend\src\controllers\cancellation.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { cancelBooking, rescheduleBooking } from '../services/cancellation.service.js';
+import { AppError } from '../utils/AppError.js';
+
+const cancelSchema = z.object({
+  reason: z.string().optional(),
+});
+
+const rescheduleSchema = z.object({
+  newStartAt: z.string().datetime(),
+});
+
+export const postCancelBooking: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = req.params['id'];
+  if (!id || typeof id !== 'string') throw new AppError(400, 'MISSING_ID', 'Booking ID required');
+  const { reason } = cancelSchema.parse(req.body);
+
+  const result = await cancelBooking(id, req.auth.id, reason);
+  res.json(result);
+};
+
+export const postRescheduleBooking: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = req.params['id'];
+  if (!id || typeof id !== 'string') throw new AppError(400, 'MISSING_ID', 'Booking ID required');
+  const { newStartAt } = rescheduleSchema.parse(req.body);
+
+  const booking = await rescheduleBooking(id, req.auth.id, new Date(newStartAt));
+  res.json({ booking });
+};
+
+
+===== FILE: Backend\src\controllers\notification.controller.ts =====
+import type { RequestHandler } from 'express';
+import { getUserNotifications, markAllNotificationsAsRead, markNotificationAsRead } from '../services/notification.service.js';
+import { AppError } from '../utils/AppError.js';
+
+export const getMyNotifications: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const notifications = await getUserNotifications(req.auth.id);
+  res.json({ notifications });
+};
+
+export const patchMarkRead: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = req.params['id'];
+  if (!id || typeof id !== 'string') throw new AppError(400, 'MISSING_ID', 'Notification ID required');
+
+  const notification = await markNotificationAsRead(id, req.auth.id);
+  res.json({ notification });
+};
+
+export const postMarkAllRead: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const result = await markAllNotificationsAsRead(req.auth.id);
+  res.json({ updated: result.modifiedCount });
+};
+
+
+===== FILE: Backend\src\controllers\package.controller.ts =====
+import type { RequestHandler } from 'express';
+import { PackageTemplate } from '../models/PackageTemplate.js';
+import { getPackagesForCustomer } from '../services/package.service.js';
+import { AppError } from '../utils/AppError.js';
+
+export const getTemplates: RequestHandler = async (_req, res) => {
+  const templates = await PackageTemplate.find({ isActive: true }).sort({ pricePaise: 1 });
+  res.json({ templates });
+};
+
+export const getMyPackages: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const packages = await getPackagesForCustomer(req.auth.id);
+  res.json({ packages });
+};
+
+
+===== FILE: Backend\src\controllers\payment.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { createPaymentOrder, verifyPayment } from '../services/payment.service.js';
+import { AppError } from '../utils/AppError.js';
+
+const orderSchema = z
+  .object({
+    bookingId: z.string().min(1).optional(),
+    packageTemplateId: z.string().min(1).optional(),
+  })
+  .refine((v) => Boolean(v.bookingId) !== Boolean(v.packageTemplateId), {
+    message: 'Provide exactly one of bookingId or packageTemplateId',
+  });
+
+const verifySchema = z.object({
+  orderId: z.string().min(1),
+  paymentId: z.string().min(1),
+  signature: z.string().min(1),
+});
+
+export const postCreateOrder: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const body = orderSchema.parse(req.body);
+  const order = await createPaymentOrder(req.auth.id, body);
+  res.status(201).json({ order });
+};
+
+export const postVerifyPayment: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const input = verifySchema.parse(req.body);
+  const result = await verifyPayment(req.auth.id, input);
+  res.json({
+    payment: {
+      _id: result.payment._id.toString(),
+      status: result.payment.status,
+      amountPaise: result.payment.amountPaise,
+      razorpayOrderId: result.payment.razorpayOrderId,
+      razorpayPaymentId: result.payment.razorpayPaymentId,
+    },
+    package: result.package,
+  });
+};
+
+===== FILE: Backend\src\controllers\pricing.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { calculateQuoteForDate, getPricingConfig, updatePricingConfig } from '../services/pricing.service.js';
+import { AppError } from '../utils/AppError.js';
+
+const updatePricingSchema = z.object({
+  normalPaise: z.number().min(100),
+  peakPaise: z.number().min(100),
+  commissionPercent: z.number().min(0).max(100),
+  peakWindows: z.array(z.object({
+    weekdays: z.array(z.number().int().min(0).max(6)).min(1),
+    startMinute: z.number().int().min(0).max(1439),
+    endMinute: z.number().int().min(1).max(1440),
+  }).refine((window) => window.startMinute < window.endMinute, 'Peak window start must be before end')).min(1),
+});
+
+export const getConfig: RequestHandler = async (_req, res) => {
+  const config = await getPricingConfig();
+  res.json({ config });
+};
+
+export const putConfig: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const body = updatePricingSchema.parse(req.body);
+  const updated = await updatePricingConfig(body);
+  res.json({ config: updated });
+};
+
+export const getQuote: RequestHandler = async (req, res) => {
+  const dateStr = req.query['date'] as string | undefined;
+  const date = dateStr ? new Date(dateStr) : new Date();
+  const quote = await calculateQuoteForDate(date);
+  res.json({ quote });
+};
+
+
+===== FILE: Backend\src\controllers\record.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { SessionRecord } from '../models/SessionRecord.js';
+import { Booking } from '../models/Booking.js';
+import { generateWorkoutRecommendation } from '../services/ai.service.js';
+import { AppError } from '../utils/AppError.js';
+import { requireObjectId } from '../utils/ids.js';
+import { assertCanViewBooking } from '../utils/ownership.js';
+
+const createRecordSchema = z.object({
+  bookingId: z.string().min(1),
+  durationMinutes: z.number().min(1).max(240).default(60),
+  exercises: z.array(
+    z.object({
+      name: z.string().min(1),
+      sets: z.number().min(1),
+      reps: z.number().optional(),
+      weightKg: z.number().optional(),
+    }),
+  ),
+  trainerNotes: z.string().max(2000).optional(),
+  suggestedNextWorkout: z.string().max(1000).optional(),
+});
+
+const feedbackSchema = z.object({
+  customerRating: z.number().int().min(1).max(5),
+  customerFeedback: z.string().max(1000).optional(),
+});
+
+/** Trainer saves the workout log. Only the assigned trainer, and only once the session has started. */
+export const postSessionRecord: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const body = createRecordSchema.parse(req.body);
+  const bookingId = requireObjectId(body.bookingId, 'Booking');
+
+  const booking = await Booking.findById(bookingId);
+  if (!booking || booking.trainerId !== req.auth.id) {
+    throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+  }
+  if (!['IN_PROGRESS', 'COMPLETED'].includes(booking.status)) {
+    throw new AppError(409, 'INVALID_STATUS', 'You can log a workout after the session has started');
+  }
+
+  const record = await SessionRecord.findOneAndUpdate(
+    { bookingId },
+    {
+      $set: {
+        customerId: booking.customerId,
+        trainerId: req.auth.id,
+        durationMinutes: body.durationMinutes,
+        exercises: body.exercises,
+        trainerNotes: body.trainerNotes,
+        suggestedNextWorkout: body.suggestedNextWorkout,
+      },
+    },
+    { upsert: true, returnDocument: 'after' },
+  );
+
+  res.status(201).json({ record });
+};
+
+/** Customer rates their own completed session. Works even if the trainer has not logged yet. */
+export const postCustomerFeedback: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const bookingId = requireObjectId(req.params['bookingId'], 'Booking');
+  const { customerRating, customerFeedback } = feedbackSchema.parse(req.body);
+
+  const booking = await Booking.findById(bookingId);
+  if (!booking || booking.customerId !== req.auth.id) {
+    throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+  }
+  if (booking.status !== 'COMPLETED') {
+    throw new AppError(409, 'INVALID_STATUS', 'You can give feedback after the session is completed');
+  }
+
+  const record = await SessionRecord.findOneAndUpdate(
+    { bookingId },
+    {
+      $set: { customerRating, customerFeedback },
+      $setOnInsert: { customerId: booking.customerId, trainerId: booking.trainerId },
+    },
+    { upsert: true, returnDocument: 'after' },
+  );
+
+  res.json({ record });
+};
+
+export const getRecordByBooking: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const bookingId = requireObjectId(req.params['bookingId'], 'Booking');
+
+  const booking = await Booking.findById(bookingId);
+  if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+  assertCanViewBooking(booking, req.auth);
+
+  const record = await SessionRecord.findOne({ bookingId });
+  res.json({ record });
+};
+
+export const getMyRecords: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const records = await SessionRecord.find({ customerId: req.auth.id }).sort({ createdAt: -1 });
+  res.json({ records });
+};
+
+export const getAiRecommendation: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const recommendation = await generateWorkoutRecommendation(req.auth.id);
+  res.json({ recommendation });
+};
+
+
+===== FILE: Backend\src\controllers\session.controller.ts =====
+import type { RequestHandler } from 'express';
+import { completeSession, getSessionTicker, markOnTheWay, startSession } from '../services/session.service.js';
+import { AppError } from '../utils/AppError.js';
+import { requireObjectId } from '../utils/ids.js';
+
+export const postStartSession: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = requireObjectId(req.params['id'], 'Booking');
+  const booking = await startSession(id, req.auth.id);
+  res.json({ booking });
+};
+
+export const postOnTheWay: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const booking = await markOnTheWay(requireObjectId(req.params['id'], 'Booking'), req.auth.id);
+  res.json({ booking });
+};
+
+export const getTicker: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = requireObjectId(req.params['id'], 'Booking');
+  const ticker = await getSessionTicker(id, req.auth);
+  res.json({ ticker });
+};
+
+export const postCompleteSession: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = requireObjectId(req.params['id'], 'Booking');
+  const booking = await completeSession(id, req.auth.id);
+  res.json({ booking });
+};
+
+
+===== FILE: Backend\src\controllers\society.controller.ts =====
+import type { RequestHandler } from 'express';
+import { Society } from '../models/Society.js';
+
+export const getSocieties: RequestHandler = async (_req, res) => {
+  const societies = await Society.find({ isActive: true }).sort({ name: 1 });
+  res.json({ societies });
+};
+
+===== FILE: Backend\src\controllers\trainer.controller.ts =====
+import type { RequestHandler } from 'express';
+import { z } from 'zod';
+import { addTimeOffBlock, getTrainerProfileByUserId, removeTimeOffBlock, updateWeeklyAvailability } from '../services/availability.service.js';
+import { AppError } from '../utils/AppError.js';
+
+const weeklySlotSchema = z.object({
+  weekday: z.number().int().min(0).max(6),
+  start: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:mm format'),
+  end: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Use HH:mm format'),
+});
+
+const availabilitySchema = z.object({
+  weeklyAvailability: z.array(weeklySlotSchema),
+});
+
+const timeOffSchema = z.object({
+  from: z.string().datetime(),
+  to: z.string().datetime(),
+  reason: z.string().optional(),
+});
+
+export const getMyProfile: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const profile = await getTrainerProfileByUserId(req.auth.id);
+  res.json({ profile });
+};
+
+export const setAvailability: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const { weeklyAvailability } = availabilitySchema.parse(req.body);
+  const profile = await updateWeeklyAvailability(req.auth.id, weeklyAvailability);
+  res.json({ profile });
+};
+
+export const postTimeOff: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const { from, to, reason } = timeOffSchema.parse(req.body);
+  const profile = await addTimeOffBlock(req.auth.id, new Date(from), new Date(to), reason);
+  res.json({ profile });
+};
+
+export const deleteTimeOff: RequestHandler = async (req, res) => {
+  if (!req.auth) throw new AppError(401, 'UNAUTHENTICATED', 'Log in required');
+  const id = req.params['id'];
+  if (!id || typeof id !== 'string') throw new AppError(400, 'MISSING_ID', 'Time-off ID is required');
+  const profile = await removeTimeOffBlock(req.auth.id, id);
+  res.json({ profile });
+};
+
+===== FILE: Backend\src\middleware\auth.ts =====
+import type { RequestHandler } from 'express';
+import { AppError } from '../utils/AppError.js';
+import { verifyToken } from '../utils/jwt.js';
+import type { Role } from '../models/User.js';
+
+export interface AuthUser {
+  id: string;
+  role: Role;
+}
+
+declare module 'express-serve-static-core' {
+  interface Request {
+    auth?: AuthUser;
+  }
+}
+
+/** Requires a valid "Authorization: Bearer <jwt>" header. Sets req.auth. */
+export const requireAuth: RequestHandler = (req, _res, next) => {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    throw new AppError(401, 'UNAUTHENTICATED', 'Please log in to continue');
+  }
+  const payload = verifyToken(header.slice('Bearer '.length));
+  if (!payload) {
+    throw new AppError(401, 'INVALID_TOKEN', 'Your session has expired. Please log in again');
+  }
+  req.auth = { id: payload.sub, role: payload.role };
+  next();
+};
+
+/** Use after requireAuth. Example: router.get('/x', requireAuth, requireRole('admin'), handler) */
+export function requireRole(...roles: Role[]): RequestHandler {
+  return (req, _res, next) => {
+    if (!req.auth || !roles.includes(req.auth.role)) {
+      throw new AppError(403, 'FORBIDDEN', 'You do not have access to this resource');
+    }
+    next();
+  };
+}
+
+
+===== FILE: Backend\src\middleware\error.ts =====
+import type { ErrorRequestHandler, RequestHandler } from 'express';
+import { ZodError } from 'zod';
+import { AppError } from '../utils/AppError.js';
+import { env } from '../config/env.js';
+
+export const notFoundHandler: RequestHandler = (req, res) => {
+  res.status(404).json({
+    error: { code: 'NOT_FOUND', message: `Route ${req.method} ${req.originalUrl} not found` },
+  });
+};
+
+function isDuplicateKeyError(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
+}
+
+// Express 5 forwards errors from async handlers here automatically.
+export const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
+  if (err instanceof AppError) {
+    res.status(err.status).json({
+      error: { code: err.code, message: err.message, details: err.details },
+    });
+    return;
+  }
+
+  if (err instanceof ZodError) {
+    res.status(400).json({
+      error: {
+        code: 'VALIDATION_ERROR',
+        message: 'Please check the highlighted fields',
+        details: err.issues.map((i) => ({ path: i.path.join('.'), message: i.message })),
+      },
+    });
+    return;
+  }
+
+  if (isDuplicateKeyError(err)) {
+    res.status(409).json({ error: { code: 'DUPLICATE', message: 'This record already exists' } });
+    return;
+  }
+
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: env.isProduction ? 'Something went wrong' : String(err?.message ?? err),
+    },
+  });
+};
+
+===== FILE: Backend\src\models\AssignmentDecision.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export interface CandidateEvaluation {
+  trainerId: string;
+  trainerName: string;
+  distanceKm: number;
+  sessionsToday: number;
+  rating: number;
+  eligible: boolean;
+  reason?: string;
+}
+
+export interface IAssignmentDecision {
+  bookingId?: Types.ObjectId | string;
+  requestedAt: Date;
+  slotStart: Date;
+  societyId: Types.ObjectId | string;
+  candidates: CandidateEvaluation[];
+  chosenTrainerId?: string;
+  outcome: 'ASSIGNED' | 'NO_TRAINER';
+}
+
+const candidateEvaluationSchema = new Schema<CandidateEvaluation>(
+  {
+    trainerId: { type: String, required: true },
+    trainerName: { type: String, required: true },
+    distanceKm: { type: Number, required: true },
+    sessionsToday: { type: Number, required: true },
+    rating: { type: Number, required: true },
+    eligible: { type: Boolean, required: true },
+    reason: { type: String },
+  },
+  { _id: false },
+);
+
+const assignmentDecisionSchema = new Schema<IAssignmentDecision>(
+  {
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking' },
+    requestedAt: { type: Date, required: true, default: Date.now },
+    slotStart: { type: Date, required: true },
+    societyId: { type: Schema.Types.ObjectId, ref: 'Society', required: true },
+    candidates: [candidateEvaluationSchema],
+    chosenTrainerId: { type: String },
+    outcome: { type: String, enum: ['ASSIGNED', 'NO_TRAINER'], required: true },
+  },
+  { timestamps: true },
+);
+
+export const AssignmentDecision = model<IAssignmentDecision>('AssignmentDecision', assignmentDecisionSchema);
+
+===== FILE: Backend\src\models\Booking.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export const BOOKING_MODES = ['INSTANT', 'SCHEDULED'] as const;
+export type BookingMode = (typeof BOOKING_MODES)[number];
+
+export const BOOKING_STATUSES = [
+  'PENDING_PAYMENT',
+  'CONFIRMED',
+  'ON_THE_WAY',
+  'IN_PROGRESS',
+  'COMPLETED',
+  'CANCELLED',
+  'EXPIRED',
+] as const;
+export type BookingStatus = (typeof BOOKING_STATUSES)[number];
+
+export interface PriceSnapshot {
+  tier: 'NORMAL' | 'PEAK';
+  sessionPaise: number;
+  commissionPaise: number;
+  totalPaise: number;
+  commissionPercent: number;
+  configVersion: number;
+}
+
+export interface IBooking {
+  customerId: string;
+  trainerId: string;
+  societyId: Types.ObjectId | string;
+  mode: BookingMode;
+  startAt: Date;
+  endAt: Date;
+  status: BookingStatus;
+  paymentMode: 'PAYMENT' | 'PACKAGE';
+  packageId?: string;
+  priceSnapshot: PriceSnapshot;
+  preferredTrainerId?: string;
+  preferredHonored?: boolean;
+  idempotencyKey?: string;
+  holdExpiresAt?: Date;
+  rescheduleCount: number;
+  cancelledAt?: Date;
+  cancelReason?: string;
+  session?: {
+    startedAt?: Date;
+    warnAt?: Date;
+    endsAt?: Date;
+    warnFiredAt?: Date;
+    completeFiredAt?: Date;
+  };
+}
+
+const bookingSchema = new Schema<IBooking>(
+  {
+    customerId: { type: String, required: true, index: true },
+    trainerId: { type: String, required: true, index: true },
+    societyId: { type: Schema.Types.ObjectId, ref: 'Society', required: true },
+    mode: { type: String, enum: BOOKING_MODES, required: true },
+    startAt: { type: Date, required: true, index: true },
+    endAt: { type: Date, required: true },
+    status: { type: String, enum: BOOKING_STATUSES, default: 'CONFIRMED' },
+    paymentMode: { type: String, enum: ['PAYMENT', 'PACKAGE'], default: 'PAYMENT' },
+    packageId: { type: String },
+    priceSnapshot: {
+      tier: { type: String, enum: ['NORMAL', 'PEAK'], required: true },
+      sessionPaise: { type: Number, required: true },
+      commissionPaise: { type: Number, required: true },
+      totalPaise: { type: Number, required: true },
+      commissionPercent: { type: Number, required: true },
+      configVersion: { type: Number, required: true },
+    },
+    preferredTrainerId: { type: String },
+    preferredHonored: { type: Boolean, default: false },
+    idempotencyKey: { type: String, index: true },
+    holdExpiresAt: { type: Date },
+    rescheduleCount: { type: Number, default: 0 },
+    cancelledAt: { type: Date },
+    cancelReason: { type: String },
+    session: {
+      startedAt: { type: Date },
+      warnAt: { type: Date },
+      endsAt: { type: Date },
+      warnFiredAt: { type: Date },
+      completeFiredAt: { type: Date },
+    },
+  },
+  { timestamps: true },
+);
+
+bookingSchema.index({ customerId: 1, idempotencyKey: 1 }, { unique: true, sparse: true });
+
+export const Booking = model<IBooking>('Booking', bookingSchema);
+
+===== FILE: Backend\src\models\CustomerPackage.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export interface ICustomerPackage {
+  customerId: string;
+  templateId: Types.ObjectId | string;
+  packageName: string;
+  totalSessions: number;
+  usedSessions: number;
+  purchasedAt: Date;
+  expiresAt: Date;
+  paymentId?: Types.ObjectId | string;
+}
+
+const customerPackageSchema = new Schema<ICustomerPackage>(
+  {
+    customerId: { type: String, required: true, index: true },
+    templateId: { type: Schema.Types.ObjectId, ref: 'PackageTemplate', required: true },
+    packageName: { type: String, required: true },
+    totalSessions: { type: Number, required: true, min: 1 },
+    usedSessions: { type: Number, required: true, default: 0 },
+    purchasedAt: { type: Date, required: true, default: Date.now },
+    expiresAt: { type: Date, required: true },
+    paymentId: { type: Schema.Types.ObjectId, ref: 'Payment' },
+  },
+  { timestamps: true },
+);
+
+// One verified payment can create at most one package (also makes verify retries safe).
+customerPackageSchema.index({ paymentId: 1 }, { unique: true, sparse: true });
+
+export const CustomerPackage = model<ICustomerPackage>('CustomerPackage', customerPackageSchema);
+
+===== FILE: Backend\src\models\CustomerProfile.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export interface ICustomerProfile {
+  userId: string;
+  societyId: Types.ObjectId | string;
+  flatNumber?: string;
+  phone?: string;
+}
+
+const customerProfileSchema = new Schema<ICustomerProfile>(
+  {
+    userId: { type: String, required: true, unique: true, index: true },
+    societyId: { type: Schema.Types.ObjectId, ref: 'Society', required: true },
+    flatNumber: { type: String, trim: true },
+    phone: { type: String, trim: true },
+  },
+  { timestamps: true },
+);
+
+export const CustomerProfile = model<ICustomerProfile>('CustomerProfile', customerProfileSchema);
+
+===== FILE: Backend\src\models\FitnessAssessment.ts =====
+import { Schema, model } from 'mongoose';
+
+export const FITNESS_LEVELS = ['beginner', 'intermediate', 'advanced'] as const;
+export type FitnessLevel = (typeof FITNESS_LEVELS)[number];
+
+export interface IFitnessAssessment {
+  customerId: string;
+  version: number;
+  age: number;
+  weightKg: number;
+  goals: string[];
+  level: FitnessLevel;
+  preferences: string[];
+  limitations?: string;
+}
+
+const fitnessAssessmentSchema = new Schema<IFitnessAssessment>(
+  {
+    customerId: { type: String, required: true, index: true },
+    version: { type: Number, required: true, default: 1 },
+    age: { type: Number, required: true, min: 10, max: 100 },
+    weightKg: { type: Number, required: true, min: 20, max: 300 },
+    goals: [{ type: String, required: true }],
+    level: { type: String, enum: FITNESS_LEVELS, required: true },
+    preferences: [{ type: String }],
+    limitations: { type: String, trim: true },
+  },
+  { timestamps: true },
+);
+
+fitnessAssessmentSchema.index({ customerId: 1, version: -1 });
+
+export const FitnessAssessment = model<IFitnessAssessment>('FitnessAssessment', fitnessAssessmentSchema);
+
+===== FILE: Backend\src\models\Notification.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export type NotificationType =
+  | 'BOOKING_ASSIGNED'
+  | 'BOOKING_CANCELLED'
+  | 'BOOKING_RESCHEDULED'
+  | 'SESSION_REMINDER';
+
+export interface INotification {
+  userId: string;
+  type: NotificationType;
+  bookingId?: Types.ObjectId | string;
+  title?: string;
+  data?: Record<string, unknown>;
+  message: string;
+  readAt?: Date;
+}
+
+const notificationSchema = new Schema<INotification>(
+  {
+    userId: { type: String, required: true, index: true },
+    type: {
+      type: String,
+      enum: ['BOOKING_ASSIGNED', 'BOOKING_CANCELLED', 'BOOKING_RESCHEDULED', 'SESSION_REMINDER'],
+      required: true,
+    },
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking' },
+    title: { type: String, trim: true },
+    data: { type: Schema.Types.Mixed },
+    message: { type: String, required: true, trim: true },
+    readAt: { type: Date },
+  },
+  { timestamps: true },
+);
+
+export const Notification = model<INotification>('Notification', notificationSchema);
+
+
+===== FILE: Backend\src\models\PackageLedger.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export interface IPackageLedger {
+  packageId: Types.ObjectId | string;
+  bookingId: Types.ObjectId | string;
+  type: 'CONSUME' | 'RESTORE';
+  sessionsCount: number;
+}
+
+const packageLedgerSchema = new Schema<IPackageLedger>(
+  {
+    packageId: { type: Schema.Types.ObjectId, ref: 'CustomerPackage', required: true, index: true },
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking', required: true },
+    type: { type: String, enum: ['CONSUME', 'RESTORE'], required: true },
+    sessionsCount: { type: Number, required: true, default: 1 },
+  },
+  { timestamps: true },
+);
+
+// Unique index ensures a booking cannot deduct from a package twice
+packageLedgerSchema.index({ bookingId: 1, type: 1 }, { unique: true });
+
+export const PackageLedger = model<IPackageLedger>('PackageLedger', packageLedgerSchema);
+
+===== FILE: Backend\src\models\PackageTemplate.ts =====
+import { Schema, model } from 'mongoose';
+
+export interface IPackageTemplate {
+  name: string;
+  sessions: number;
+  pricePaise: number;
+  validityDays: number;
+  description: string;
+  isActive: boolean;
+}
+
+const packageTemplateSchema = new Schema<IPackageTemplate>(
+  {
+    name: { type: String, required: true, trim: true },
+    sessions: { type: Number, required: true, min: 1 },
+    pricePaise: { type: Number, required: true, min: 0 },
+    validityDays: { type: Number, required: true, min: 1 },
+    description: { type: String, required: true, trim: true },
+    isActive: { type: Boolean, default: true },
+  },
+  { timestamps: true },
+);
+
+export const PackageTemplate = model<IPackageTemplate>('PackageTemplate', packageTemplateSchema);
+
+===== FILE: Backend\src\models\Payment.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export type PaymentPurpose = 'BOOKING' | 'PACKAGE';
+
+export interface IPayment {
+  bookingId?: Types.ObjectId | string;
+  packageTemplateId?: Types.ObjectId | string;
+  purpose: PaymentPurpose;
+  customerId: string;
+  razorpayOrderId: string;
+  razorpayPaymentId?: string;
+  amountPaise: number;
+  status: 'CREATED' | 'PAID' | 'FAILED' | 'REFUNDED';
+  signatureVerified: boolean;
+  refundId?: string;
+  refundedAt?: Date;
+  refundError?: string;
+}
+
+const paymentSchema = new Schema<IPayment>(
+  {
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking' },
+    packageTemplateId: { type: Schema.Types.ObjectId, ref: 'PackageTemplate' },
+    purpose: { type: String, enum: ['BOOKING', 'PACKAGE'], default: 'BOOKING' },
+    customerId: { type: String, required: true, index: true },
+    razorpayOrderId: { type: String, required: true, unique: true },
+    razorpayPaymentId: { type: String },
+    amountPaise: { type: Number, required: true },
+    status: { type: String, enum: ['CREATED', 'PAID', 'FAILED', 'REFUNDED'], default: 'CREATED' },
+    signatureVerified: { type: Boolean, default: false },
+    refundId: { type: String },
+    refundedAt: { type: Date },
+    refundError: { type: String },
+  },
+  { timestamps: true },
+);
+
+export const Payment = model<IPayment>('Payment', paymentSchema);
+
+===== FILE: Backend\src\models\PricingConfig.ts =====
+import { Schema, model } from 'mongoose';
+
+export interface PeakWindow {
+  weekdays: number[];
+  startMinute: number;
+  endMinute: number;
+}
+
+export interface IPricingConfig {
+  _id: string;
+  normalPaise: number;
+  peakPaise: number;
+  commissionPercent: number;
+  timezone: string;
+  peakWindows: PeakWindow[];
+  version: number;
+}
+
+const peakWindowSchema = new Schema<PeakWindow>(
+  {
+    weekdays: [{ type: Number }],
+    startMinute: { type: Number, required: true },
+    endMinute: { type: Number, required: true },
+  },
+  { _id: false },
+);
+
+const pricingConfigSchema = new Schema<IPricingConfig>(
+  {
+    _id: { type: String, default: 'default' },
+    normalPaise: { type: Number, required: true, default: 39900 },
+    peakPaise: { type: Number, required: true, default: 49900 },
+    commissionPercent: { type: Number, required: true, default: 10 },
+    timezone: { type: String, required: true, default: 'Asia/Kolkata' },
+    peakWindows: [peakWindowSchema],
+    version: { type: Number, required: true, default: 1 },
+  },
+  { timestamps: true },
+);
+
+export const PricingConfig = model<IPricingConfig>('PricingConfig', pricingConfigSchema);
+
+===== FILE: Backend\src\models\SessionRecord.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export interface ExerciseItem {
+  name: string;
+  sets: number;
+  reps?: number;
+  weightKg?: number;
+}
+
+export interface ISessionRecord {
+  bookingId: Types.ObjectId | string;
+  customerId: string;
+  trainerId: string;
+  durationMinutes: number;
+  exercises: ExerciseItem[];
+  trainerNotes?: string;
+  suggestedNextWorkout?: string;
+  customerRating?: number;
+  customerFeedback?: string;
+}
+
+const exerciseSchema = new Schema<ExerciseItem>(
+  {
+    name: { type: String, required: true },
+    sets: { type: Number, required: true },
+    reps: { type: Number },
+    weightKg: { type: Number },
+  },
+  { _id: false },
+);
+
+const sessionRecordSchema = new Schema<ISessionRecord>(
+  {
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking', required: true, unique: true },
+    customerId: { type: String, required: true, index: true },
+    trainerId: { type: String, required: true, index: true },
+    durationMinutes: { type: Number, required: true, default: 60 },
+    exercises: [exerciseSchema],
+    trainerNotes: { type: String },
+    suggestedNextWorkout: { type: String },
+    customerRating: { type: Number, min: 1, max: 5 },
+    customerFeedback: { type: String },
+  },
+  { timestamps: true },
+);
+
+export const SessionRecord = model<ISessionRecord>('SessionRecord', sessionRecordSchema);
+
+===== FILE: Backend\src\models\SlotLock.ts =====
+import { Schema, model, Types } from 'mongoose';
+
+export interface ISlotLock {
+  trainerId: string;
+  atomStart: Date;
+  bookingId?: Types.ObjectId | string;
+  state: 'HELD' | 'CONFIRMED';
+  holdExpiresAt?: Date;
+}
+
+const slotLockSchema = new Schema<ISlotLock>(
+  {
+    trainerId: { type: String, required: true },
+    atomStart: { type: Date, required: true },
+    bookingId: { type: Schema.Types.ObjectId, ref: 'Booking' },
+    state: { type: String, enum: ['HELD', 'CONFIRMED'], default: 'HELD' },
+    holdExpiresAt: { type: Date },
+  },
+  { timestamps: true },
+);
+
+slotLockSchema.index({ trainerId: 1, atomStart: 1 }, { unique: true });
+
+export const SlotLock = model<ISlotLock>('SlotLock', slotLockSchema);
+
+===== FILE: Backend\src\models\Society.ts =====
+import { Schema, model } from 'mongoose';
+
+export interface ISociety {
+  _id: string;
+  name: string;
+  zoneId: string;
+  address: string;
+  location: {
+    lat: number;
+    lng: number;
+  };
+  commissionPercent: number;
+  isActive: boolean;
+}
+
+const societySchema = new Schema<ISociety>(
+  {
+    name: { type: String, required: true, trim: true },
+    zoneId: { type: String, required: true, trim: true, index: true },
+    address: { type: String, required: true, trim: true },
+    location: {
+      lat: { type: Number, required: true },
+      lng: { type: Number, required: true },
+    },
+    commissionPercent: { type: Number, required: true, default: 10 },
+    isActive: { type: Boolean, default: true },
+  },
+  { timestamps: true },
+);
+
+export const Society = model<ISociety>('Society', societySchema);
+
+===== FILE: Backend\src\models\TrainerProfile.ts =====
+import { Schema, model } from 'mongoose';
+
+export interface WeeklySlot {
+  weekday: number; // 0 = Sun, 1 = Mon, ..., 6 = Sat
+  start: string; // "HH:mm"
+  end: string;   // "HH:mm"
+}
+
+export interface TimeOff {
+  _id?: string;
+  from: Date;
+  to: Date;
+  reason?: string;
+}
+
+export interface ITrainerProfile {
+  userId: string;
+  zoneIds: string[];
+  baseLocation: {
+    lat: number;
+    lng: number;
+  };
+  rating: number;
+  bio?: string;
+  isActive: boolean;
+  weeklyAvailability: WeeklySlot[];
+  timeOff: TimeOff[];
+}
+
+const weeklySlotSchema = new Schema<WeeklySlot>(
+  {
+    weekday: { type: Number, required: true, min: 0, max: 6 },
+    start: { type: String, required: true },
+    end: { type: String, required: true },
+  },
+  { _id: false },
+);
+
+const timeOffSchema = new Schema<TimeOff>({
+  from: { type: Date, required: true },
+  to: { type: Date, required: true },
+  reason: { type: String, trim: true },
+});
+
+const trainerProfileSchema = new Schema<ITrainerProfile>(
+  {
+    userId: { type: String, required: true, unique: true, index: true },
+    zoneIds: [{ type: String, required: true }],
+    baseLocation: {
+      lat: { type: Number, required: true },
+      lng: { type: Number, required: true },
+    },
+    rating: { type: Number, required: true, default: 5.0 },
+    bio: { type: String, trim: true },
+    isActive: { type: Boolean, default: true },
+    weeklyAvailability: [weeklySlotSchema],
+    timeOff: [timeOffSchema],
+  },
+  { timestamps: true },
+);
+
+export const TrainerProfile = model<ITrainerProfile>('TrainerProfile', trainerProfileSchema);
+
+===== FILE: Backend\src\models\User.ts =====
+import { Schema, model } from 'mongoose';
+
+export const ROLES = ['customer', 'trainer', 'admin'] as const;
+export type Role = (typeof ROLES)[number];
+
+const userSchema = new Schema(
+  {
+    name: { type: String, required: true, trim: true, minlength: 2, maxlength: 60 },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    passwordHash: { type: String, required: true, select: false },
+    role: { type: String, enum: ROLES, required: true, default: 'customer' },
+    isActive: { type: Boolean, default: true },
+  },
+  { timestamps: true },
+);
+
+export const User = model('User', userSchema);
+
+/** The only shape of a user that ever leaves the API. Never includes passwordHash. */
+export interface PublicUser {
+  id: string;
+  name: string;
+  email: string;
+  role: Role;
+  createdAt: string;
+}
+
+export function toPublicUser(user: {
+  _id: { toString(): string };
+  name: string;
+  email: string;
+  role: string;
+  createdAt: Date;
+}): PublicUser {
+  return {
+    id: user._id.toString(),
+    name: user.name,
+    email: user.email,
+    role: user.role as Role,
+    createdAt: user.createdAt.toISOString(),
+  };
+}
+
+===== FILE: Backend\src\routes\assessment.routes.ts =====
+import { Router } from 'express';
+import { getMyAssessment, submitAssessment } from '../controllers/assessment.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.get('/me', requireAuth, requireRole('customer'), getMyAssessment);
+router.post('/', requireAuth, requireRole('customer'), submitAssessment);
+
+export default router;
+
+===== FILE: Backend\src\routes\auth.routes.ts =====
+import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
+import { login, me, register } from '../controllers/auth.controller.js';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+
+// Brute-force protection for login/register only.
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { error: { code: 'RATE_LIMITED', message: 'Too many attempts. Try again in a few minutes' } },
+});
+
+router.post('/register', authLimiter, register);
+router.post('/login', authLimiter, login);
+router.get('/me', requireAuth, me);
+
+export default router;
+
+===== FILE: Backend\src\routes\availability.routes.ts =====
+import { Router } from 'express';
+import { getDaySlots, getEligibleTrainers, getInstantSlotOptions } from '../controllers/availability.controller.js';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+
+router.get('/slots', requireAuth, getDaySlots);
+router.get('/instant', requireAuth, getInstantSlotOptions);
+router.get('/trainers', requireAuth, getEligibleTrainers);
+
+export default router;
+
+===== FILE: Backend\src\routes\booking.routes.ts =====
+import { Router } from 'express';
+import {
+  getAllBookingsAdmin,
+  getAssignmentDecisionsAdmin,
+  getAssignedBookings,
+  getBookingById,
+  getMyBookings,
+  postBooking,
+} from '../controllers/booking.controller.js';
+import { postCancelBooking, postRescheduleBooking } from '../controllers/cancellation.controller.js';
+import { getTicker, postCompleteSession, postOnTheWay, postStartSession } from '../controllers/session.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.post('/', requireAuth, requireRole('customer'), postBooking);
+router.get('/', requireAuth, requireRole('customer'), getMyBookings);
+router.get('/assigned', requireAuth, requireRole('trainer'), getAssignedBookings);
+router.get('/admin/all', requireAuth, requireRole('admin'), getAllBookingsAdmin);
+router.get('/admin/assignments', requireAuth, requireRole('admin'), getAssignmentDecisionsAdmin);
+
+router.get('/:id', requireAuth, getBookingById);
+router.post('/:id/cancel', requireAuth, postCancelBooking);
+router.post('/:id/reschedule', requireAuth, requireRole('customer'), postRescheduleBooking);
+
+// Live session timer routes
+router.post('/:id/session/start', requireAuth, requireRole('trainer'), postStartSession);
+router.post('/:id/session/on-the-way', requireAuth, requireRole('trainer'), postOnTheWay);
+router.get('/:id/session/ticker', requireAuth, getTicker);
+router.post('/:id/session/complete', requireAuth, requireRole('trainer'), postCompleteSession);
+
+export default router;
+
+
+===== FILE: Backend\src\routes\index.ts =====
+import { Router } from 'express';
+import mongoose from 'mongoose';
+import authRoutes from './auth.routes.js';
+import pricingRoutes from './pricing.routes.js';
+import societyRoutes from './society.routes.js';
+import assessmentRoutes from './assessment.routes.js';
+import trainerRoutes from './trainer.routes.js';
+import bookingRoutes from './booking.routes.js';
+import paymentRoutes from './payment.routes.js';
+import packageRoutes from './package.routes.js';
+import availabilityRoutes from './availability.routes.js';
+import recordRoutes from './record.routes.js';
+import tickerRoutes from './ticker.routes.js';
+import notificationRoutes from './notification.routes.js';
+
+const router = Router();
+
+router.get('/health', (_req, res) => {
+  res.json({
+    status: 'ok',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'disconnected',
+    time: new Date().toISOString(),
+  });
+});
+
+router.use('/auth', authRoutes);
+router.use('/pricing', pricingRoutes);
+router.use('/societies', societyRoutes);
+router.use('/assessments', assessmentRoutes);
+router.use('/trainer', trainerRoutes);
+router.use('/bookings', bookingRoutes);
+router.use('/payments', paymentRoutes);
+router.use('/packages', packageRoutes);
+router.use('/availability', availabilityRoutes);
+router.use('/records', recordRoutes);
+router.use('/ticker', tickerRoutes);
+router.use('/notifications', notificationRoutes);
+
+export default router;
+
+
+===== FILE: Backend\src\routes\notification.routes.ts =====
+import { Router } from 'express';
+import { getMyNotifications, patchMarkRead, postMarkAllRead } from '../controllers/notification.controller.js';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+router.use(requireAuth);
+router.get('/', getMyNotifications);
+router.patch('/:id/read', patchMarkRead);
+router.post('/read-all', postMarkAllRead);
+export default router;
+
+
+===== FILE: Backend\src\routes\package.routes.ts =====
+import { Router } from 'express';
+import { getMyPackages, getTemplates } from '../controllers/package.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.get('/templates', getTemplates);
+router.get('/mine', requireAuth, requireRole('customer'), getMyPackages);
+// Packages are created only by POST /payments/verify after a verified payment.
+
+export default router;
+
+===== FILE: Backend\src\routes\payment.routes.ts =====
+import { Router } from 'express';
+import { postCreateOrder, postVerifyPayment } from '../controllers/payment.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.post('/order', requireAuth, requireRole('customer'), postCreateOrder);
+router.post('/verify', requireAuth, requireRole('customer'), postVerifyPayment);
+
+export default router;
+
+===== FILE: Backend\src\routes\pricing.routes.ts =====
+import { Router } from 'express';
+import { getConfig, getQuote, putConfig } from '../controllers/pricing.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.get('/config', getConfig);
+router.get('/quote', getQuote);
+router.put('/config', requireAuth, requireRole('admin'), putConfig);
+
+export default router;
+
+===== FILE: Backend\src\routes\record.routes.ts =====
+import { Router } from 'express';
+import {
+  getAiRecommendation,
+  getMyRecords,
+  getRecordByBooking,
+  postCustomerFeedback,
+  postSessionRecord,
+} from '../controllers/record.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.use(requireAuth);
+
+router.post('/', requireAuth, requireRole('trainer'), postSessionRecord);
+router.get('/booking/:bookingId', requireAuth, getRecordByBooking);
+router.get('/mine', requireAuth, requireRole('customer'), getMyRecords);
+router.post('/booking/:bookingId/feedback', requireAuth, requireRole('customer'), postCustomerFeedback);
+router.get('/ai-recommendation', requireAuth, requireRole('customer'), getAiRecommendation);
+
+export default router;
+
+
+===== FILE: Backend\src\routes\society.routes.ts =====
+import { Router } from 'express';
+import { getSocieties } from '../controllers/society.controller.js';
+
+const router = Router();
+
+router.get('/', getSocieties);
+
+export default router;
+
+===== FILE: Backend\src\routes\ticker.routes.ts =====
+import { Router } from 'express';
+import { requireAuth } from '../middleware/auth.js';
+
+const router = Router();
+
+// Ensure all ticker routes require authentication (returns 401 if unauthorized)
+router.use(requireAuth);
+
+export default router;
+
+===== FILE: Backend\src\routes\trainer.routes.ts =====
+import { Router } from 'express';
+import { deleteTimeOff, getMyProfile, postTimeOff, setAvailability } from '../controllers/trainer.controller.js';
+import { requireAuth, requireRole } from '../middleware/auth.js';
+
+const router = Router();
+
+router.get('/me', requireAuth, requireRole('trainer'), getMyProfile);
+router.put('/availability', requireAuth, requireRole('trainer'), setAvailability);
+router.post('/time-off', requireAuth, requireRole('trainer'), postTimeOff);
+router.delete('/time-off/:id', requireAuth, requireRole('trainer'), deleteTimeOff);
+
+export default router;
+
+===== FILE: Backend\src\seed\migrate-pricing.ts =====
+import { connectDb, disconnectDb } from '../config/db.js';
+import { PricingConfig } from '../models/PricingConfig.js';
+import { DEFAULT_PEAK_WINDOWS, getPricingConfig } from '../services/pricing.service.js';
+
+async function run() {
+  await connectDb();
+  await getPricingConfig(); // makes sure the document exists
+
+  await PricingConfig.updateOne(
+    { _id: 'default' },
+    { $set: { peakWindows: DEFAULT_PEAK_WINDOWS }, $inc: { version: 1 } },
+  );
+
+  const updated = await PricingConfig.findById('default');
+  console.log(
+    `Pricing windows migrated. Rates unchanged: normal ${updated?.normalPaise}, peak ${updated?.peakPaise}, commission ${updated?.commissionPercent}%. Version ${updated?.version}.`,
+  );
+  await disconnectDb();
+}
+
+run().catch((err) => {
+  console.error('Pricing migration failed:', err);
+  process.exit(1);
+});
+
+===== FILE: Backend\src\seed\seed.ts =====
+import bcrypt from 'bcryptjs';
+import { connectDb, disconnectDb } from '../config/db.js';
+import { env } from '../config/env.js';
+
+import { User } from '../models/User.js';
+import type { Role } from '../models/User.js';
+import { Society } from '../models/Society.js';
+import { PricingConfig } from '../models/PricingConfig.js';
+import { PackageTemplate } from '../models/PackageTemplate.js';
+import { TrainerProfile } from '../models/TrainerProfile.js';
+import { CustomerProfile } from '../models/CustomerProfile.js';
+import { FitnessAssessment } from '../models/FitnessAssessment.js';
+import { CustomerPackage } from '../models/CustomerPackage.js';
+import { Booking } from '../models/Booking.js';
+import { SessionRecord } from '../models/SessionRecord.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { AssignmentDecision } from '../models/AssignmentDecision.js';
+import { PackageLedger } from '../models/PackageLedger.js';
+import { Notification } from '../models/Notification.js';
+import { Payment } from '../models/Payment.js';
+import { DEFAULT_PEAK_WINDOWS } from '../services/pricing.service.js';
+
+interface SeedUser {
+  name: string;
+  email: string;
+  role: Role;
+}
+
+const SEED_USERS: SeedUser[] = [
+  { name: 'Demo Admin', email: 'admin@demo.test', role: 'admin' },
+  { name: 'Aarav Sharma', email: 'customer@demo.test', role: 'customer' },
+  { name: 'Priya Verma', email: 'customer2@demo.test', role: 'customer' },
+  { name: 'Rohan Kapoor', email: 'customer3@demo.test', role: 'customer' },
+  { name: 'Neha Reddy', email: 'customer4@demo.test', role: 'customer' },
+  { name: 'Siddharth Nair', email: 'customer5@demo.test', role: 'customer' },
+  { name: 'Vikram Singh', email: 'trainer1@demo.test', role: 'trainer' },
+  { name: 'Ananya Rao', email: 'trainer2@demo.test', role: 'trainer' },
+  { name: 'Kabir Mehta', email: 'trainer3@demo.test', role: 'trainer' },
+  { name: 'Sneha Patel', email: 'trainer4@demo.test', role: 'trainer' },
+  { name: 'Rohan Gupta', email: 'trainer5@demo.test', role: 'trainer' },
+];
+
+const SEED_SOCIETIES = [
+  { name: 'Prestige Ferns Residency', zoneId: 'zone-bangalore-south', address: 'HSR Layout, Bangalore', location: { lat: 12.9121, lng: 77.6445 }, commissionPercent: 10 },
+  { name: 'Green Glen Layout', zoneId: 'zone-bangalore-east', address: 'Bellandur, Bangalore', location: { lat: 12.9279, lng: 77.6712 }, commissionPercent: 10 },
+  { name: 'Palm Meadows', zoneId: 'zone-bangalore-east', address: 'Whitefield, Bangalore', location: { lat: 12.9698, lng: 77.7499 }, commissionPercent: 10 },
+  { name: 'Sobha Royal Pavilion', zoneId: 'zone-bangalore-south', address: 'Sarjapur Road, Bangalore', location: { lat: 12.9081, lng: 77.6841 }, commissionPercent: 10 },
+];
+
+const SEED_PACKAGES = [
+  { name: 'Starter Pack', sessions: 5, pricePaise: 189500, validityDays: 30, description: '5 sessions (5% discount included)' },
+  { name: 'Pro Pack', sessions: 10, pricePaise: 359100, validityDays: 60, description: '10 sessions (10% discount included)' },
+  { name: 'Elite Fitness Pass', sessions: 20, pricePaise: 678300, validityDays: 90, description: '20 sessions (15% discount included)' },
+];
+
+const TRAINER_DETAILS: Record<string, { rating: number; bio: string; zones: string[]; lat: number; lng: number; isAllDay?: boolean }> = {
+  'trainer1@demo.test': {
+    rating: 4.9,
+    bio: 'Strength & Conditioning specialist with 6+ years experience in personal training and hypertrophy.',
+    zones: ['zone-bangalore-south', 'zone-bangalore-east'],
+    lat: 12.9121,
+    lng: 77.6445,
+  },
+  'trainer2@demo.test': {
+    rating: 4.8,
+    bio: 'Certified Yoga & Functional Mobility instructor focusing on core stabilization and injury rehab.',
+    zones: ['zone-bangalore-east'],
+    lat: 12.9279,
+    lng: 77.6712,
+  },
+  'trainer3@demo.test': {
+    rating: 5.0,
+    bio: 'HIIT, Fat Loss, and Kettlebell conditioning coach dedicated to high energy, structured sessions.',
+    zones: ['zone-bangalore-south'],
+    lat: 12.9081,
+    lng: 77.6841,
+  },
+  'trainer4@demo.test': {
+    rating: 4.7,
+    bio: 'Calisthenics and bodyweight strength coach specializing in movement quality and athletic speed.',
+    zones: ['zone-bangalore-east'],
+    lat: 12.9698,
+    lng: 77.7499,
+  },
+  'trainer5@demo.test': {
+    rating: 4.9,
+    bio: 'Boxing & Endurance coach available round-the-clock for instant doorstep fitness bookings.',
+    zones: ['zone-bangalore-south', 'zone-bangalore-east'],
+    lat: 12.9150,
+    lng: 77.6500,
+    isAllDay: true,
+  },
+};
+
+async function seed() {
+  console.log('Connecting to database...');
+  await connectDb();
+
+  console.log('Clearing existing database collections and indexes...');
+  await Promise.all([
+    Booking.collection.dropIndexes().catch(() => {}),
+    SlotLock.collection.dropIndexes().catch(() => {}),
+    SessionRecord.collection.dropIndexes().catch(() => {}),
+  ]);
+
+  await Promise.all([
+    User.deleteMany({}),
+    Society.deleteMany({}),
+    PricingConfig.deleteMany({}),
+    PackageTemplate.deleteMany({}),
+    TrainerProfile.deleteMany({}),
+    CustomerProfile.deleteMany({}),
+    FitnessAssessment.deleteMany({}),
+    CustomerPackage.deleteMany({}),
+    Booking.deleteMany({}),
+    SessionRecord.deleteMany({}),
+    SlotLock.deleteMany({}),
+    AssignmentDecision.deleteMany({}),
+    PackageLedger.deleteMany({}),
+    Notification.deleteMany({}),
+    Payment.deleteMany({}),
+  ]);
+
+  const passwordHash = await bcrypt.hash(env.SEED_PASSWORD || 'password123', 12);
+  const createdUsers: Record<string, string> = {};
+
+  for (const u of SEED_USERS) {
+    const userDoc = await User.create({
+      name: u.name,
+      email: u.email,
+      role: u.role,
+      passwordHash,
+      isActive: true,
+    });
+
+    createdUsers[u.email] = userDoc._id.toString();
+
+    if (u.role === 'trainer' && TRAINER_DETAILS[u.email]) {
+      const details = TRAINER_DETAILS[u.email]!;
+      const weeklyAvailability = details.isAllDay
+        ? [0, 1, 2, 3, 4, 5, 6].map((w) => ({ weekday: w, start: '00:00', end: '23:59' }))
+        : [0, 1, 2, 3, 4, 5, 6].map((w) => ({ weekday: w, start: '05:00', end: '22:00' }));
+
+      await TrainerProfile.create({
+        userId: userDoc._id.toString(),
+        zoneIds: details.zones,
+        baseLocation: { lat: details.lat, lng: details.lng },
+        rating: details.rating,
+        bio: details.bio,
+        isActive: true,
+        weeklyAvailability,
+        timeOff: [],
+      });
+    }
+  }
+
+  const createdSocieties: Record<string, any> = {};
+  for (const s of SEED_SOCIETIES) {
+    const soc = await Society.create({ ...s, isActive: true });
+    createdSocieties[s.name] = soc;
+  }
+
+  const c1Id = createdUsers['customer@demo.test']!;
+  const c2Id = createdUsers['customer2@demo.test']!;
+  const c3Id = createdUsers['customer3@demo.test']!;
+  const c4Id = createdUsers['customer4@demo.test']!;
+  const c5Id = createdUsers['customer5@demo.test']!;
+
+  const t1Id = createdUsers['trainer1@demo.test']!;
+  const t2Id = createdUsers['trainer2@demo.test']!;
+  const t3Id = createdUsers['trainer3@demo.test']!;
+  const t4Id = createdUsers['trainer4@demo.test']!;
+  const t5Id = createdUsers['trainer5@demo.test']!;
+
+  const prestigeSoc = createdSocieties['Prestige Ferns Residency'];
+  const greenGlenSoc = createdSocieties['Green Glen Layout'];
+  const palmMeadowsSoc = createdSocieties['Palm Meadows'];
+  const sobhaPavilionSoc = createdSocieties['Sobha Royal Pavilion'];
+
+  await CustomerProfile.create({ userId: c1Id, societyId: prestigeSoc._id, flatNumber: 'B-304', phone: '+91 9876543210' });
+  await CustomerProfile.create({ userId: c2Id, societyId: greenGlenSoc._id, flatNumber: 'A-102', phone: '+91 9123456789' });
+  await CustomerProfile.create({ userId: c3Id, societyId: palmMeadowsSoc._id, flatNumber: 'Villa-45', phone: '+91 9988776655' });
+  await CustomerProfile.create({ userId: c4Id, societyId: sobhaPavilionSoc._id, flatNumber: 'C-801', phone: '+91 9765432109' });
+  await CustomerProfile.create({ userId: c5Id, societyId: prestigeSoc._id, flatNumber: 'E-1102', phone: '+91 9543210987' });
+
+  await FitnessAssessment.create({
+    customerId: c1Id,
+    version: 1,
+    age: 28,
+    weightKg: 72,
+    goals: ['Fat Loss', 'Strength'],
+    level: 'intermediate',
+    preferences: ['Strength Training', 'HIIT'],
+    limitations: 'Mild lower back sensitivity when lifting heavy off the ground',
+  });
+
+  await FitnessAssessment.create({
+    customerId: c2Id,
+    version: 1,
+    age: 34,
+    weightKg: 61,
+    goals: ['Flexibility & Mobility', 'General Fitness'],
+    level: 'beginner',
+    preferences: ['Yoga', 'Cardio'],
+    limitations: 'Recovering from right wrist tendonitis',
+  });
+
+  await FitnessAssessment.create({
+    customerId: c3Id,
+    version: 1,
+    age: 26,
+    weightKg: 78,
+    goals: ['Muscle Gain', 'Strength'],
+    level: 'advanced',
+    preferences: ['Strength Training', 'Bodyweight / Calisthenics'],
+    limitations: 'None',
+  });
+
+  await FitnessAssessment.create({
+    customerId: c4Id,
+    version: 1,
+    age: 31,
+    weightKg: 65,
+    goals: ['Fat Loss', 'Endurance'],
+    level: 'beginner',
+    preferences: ['Boxing / Kickboxing', 'HIIT'],
+    limitations: 'Slight knee discomfort on high impact jumping moves',
+  });
+
+  await FitnessAssessment.create({
+    customerId: c5Id,
+    version: 1,
+    age: 29,
+    weightKg: 70,
+    goals: ['General Fitness'],
+    level: 'intermediate',
+    preferences: ['Bodyweight / Calisthenics'],
+    limitations: 'None',
+  });
+
+  await PricingConfig.create({
+    _id: 'default',
+    normalPaise: 39900,
+    peakPaise: 49900,
+    commissionPercent: 10,
+    timezone: 'Asia/Kolkata',
+    peakWindows: DEFAULT_PEAK_WINDOWS,
+    version: 1,
+  });
+
+  const createdPackages: Record<string, any> = {};
+  for (const p of SEED_PACKAGES) {
+    const pkg = await PackageTemplate.create({ ...p, isActive: true });
+    createdPackages[p.name] = pkg;
+  }
+
+  const pkgAarav = await CustomerPackage.create({
+    customerId: c1Id,
+    templateId: createdPackages['Pro Pack']._id,
+    packageName: 'Pro Pack',
+    totalSessions: 10,
+    usedSessions: 3,
+    purchasedAt: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 50 * 24 * 60 * 60 * 1000),
+  });
+
+  const pkgPriya = await CustomerPackage.create({
+    customerId: c2Id,
+    templateId: createdPackages['Starter Pack']._id,
+    packageName: 'Starter Pack',
+    totalSessions: 5,
+    usedSessions: 1,
+    purchasedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 25 * 24 * 60 * 60 * 1000),
+  });
+
+  const pkgRohan = await CustomerPackage.create({
+    customerId: c3Id,
+    templateId: createdPackages['Elite Fitness Pass']._id,
+    packageName: 'Elite Fitness Pass',
+    totalSessions: 20,
+    usedSessions: 1,
+    purchasedAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000),
+    expiresAt: new Date(Date.now() + 87 * 24 * 60 * 60 * 1000),
+  });
+
+  const now = new Date();
+
+  // Booking 1: Completed (Aarav + Vikram)
+  const b1Start = new Date(now.getTime() - 48 * 60 * 60 * 1000);
+  const b1End = new Date(b1Start.getTime() + 60 * 60 * 1000);
+  const bk1 = await Booking.create({
+    customerId: c1Id,
+    trainerId: t1Id,
+    societyId: prestigeSoc._id,
+    mode: 'SCHEDULED',
+    startAt: b1Start,
+    endAt: b1End,
+    status: 'COMPLETED',
+    paymentMode: 'PACKAGE',
+    packageId: pkgAarav._id.toString(),
+    idempotencyKey: 'seed-bk-1',
+    priceSnapshot: { tier: 'NORMAL', sessionPaise: 39900, commissionPaise: 3990, totalPaise: 43890, commissionPercent: 10, configVersion: 1 },
+    session: { startedAt: b1Start, endsAt: b1End, completeFiredAt: b1End },
+  });
+
+  await SessionRecord.create({
+    bookingId: bk1._id,
+    customerId: c1Id,
+    trainerId: t1Id,
+    durationMinutes: 60,
+    exercises: [
+      { name: 'Goblet Squats', sets: 4, reps: 12, weightKg: 18 },
+      { name: 'Push-ups', sets: 3, reps: 15 },
+      { name: 'Dumbbell Bent-over Rows', sets: 3, reps: 12, weightKg: 14 },
+    ],
+    trainerNotes: 'Maintained pristine posture throughout goblet squats. Focused on core brace on rows.',
+    suggestedNextWorkout: 'Upper Body Hypertrophy & Posterior Chain Strength',
+    customerRating: 5,
+    customerFeedback: 'Vikram was right on time and paid super close attention to my back posture. Fantastic session!',
+  });
+
+  // Booking 2: Completed (Priya + Ananya)
+  const b2Start = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const b2End = new Date(b2Start.getTime() + 60 * 60 * 1000);
+  const bk2 = await Booking.create({
+    customerId: c2Id,
+    trainerId: t2Id,
+    societyId: greenGlenSoc._id,
+    mode: 'SCHEDULED',
+    startAt: b2Start,
+    endAt: b2End,
+    status: 'COMPLETED',
+    paymentMode: 'PACKAGE',
+    packageId: pkgPriya._id.toString(),
+    idempotencyKey: 'seed-bk-2',
+    priceSnapshot: { tier: 'PEAK', sessionPaise: 49900, commissionPaise: 4990, totalPaise: 54890, commissionPercent: 10, configVersion: 1 },
+    session: { startedAt: b2Start, endsAt: b2End, completeFiredAt: b2End },
+  });
+
+  await SessionRecord.create({
+    bookingId: bk2._id,
+    customerId: c2Id,
+    trainerId: t2Id,
+    durationMinutes: 60,
+    exercises: [
+      { name: 'Sun Salutation Flow A', sets: 3, reps: 5 },
+      { name: 'Warrior II & Reverse Warrior Hold', sets: 3, reps: 1 },
+      { name: 'Thoracic Mobility & Bird-Dog', sets: 3, reps: 10 },
+    ],
+    trainerNotes: 'Modified palm grips to protect right wrist strain. Great balance progress on single leg holds.',
+    suggestedNextWorkout: 'Gentle Mobility & Deep Hips Stretch',
+    customerRating: 5,
+    customerFeedback: 'Ananya customized the yoga routine so my wrist felt zero pain! Really grateful for her care.',
+  });
+
+  // Booking 3: Completed (Rohan K + Kabir)
+  const b3Start = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+  const b3End = new Date(b3Start.getTime() + 60 * 60 * 1000);
+  const bk3 = await Booking.create({
+    customerId: c3Id,
+    trainerId: t3Id,
+    societyId: palmMeadowsSoc._id,
+    mode: 'INSTANT',
+    startAt: b3Start,
+    endAt: b3End,
+    status: 'COMPLETED',
+    paymentMode: 'PACKAGE',
+    packageId: pkgRohan._id.toString(),
+    idempotencyKey: 'seed-bk-3',
+    priceSnapshot: { tier: 'NORMAL', sessionPaise: 39900, commissionPaise: 3990, totalPaise: 43890, commissionPercent: 10, configVersion: 1 },
+    session: { startedAt: b3Start, endsAt: b3End, completeFiredAt: b3End },
+  });
+
+  await SessionRecord.create({
+    bookingId: bk3._id,
+    customerId: c3Id,
+    trainerId: t3Id,
+    durationMinutes: 60,
+    exercises: [
+      { name: 'Kettlebell Swings', sets: 5, reps: 20, weightKg: 24 },
+      { name: 'Burpee Over KB', sets: 4, reps: 12 },
+      { name: 'Renegade Rows', sets: 3, reps: 10, weightKg: 16 },
+    ],
+    trainerNotes: 'High exertion level. Rohan handled intense intervals with strong cardiovascular recovery.',
+    suggestedNextWorkout: 'Legs & Lower Body Hypertrophy',
+    customerRating: 4,
+    customerFeedback: 'High intensity workout! Kabir pushed me right to my limit. Loved the kettlebell circuit.',
+  });
+
+  // Booking 4: In Progress (Aarav + Vikram)
+  const b4Start = new Date(now.getTime() - 15 * 60 * 1000);
+  const b4End = new Date(b4Start.getTime() + 60 * 60 * 1000);
+  const bk4 = await Booking.create({
+    customerId: c1Id,
+    trainerId: t1Id,
+    societyId: prestigeSoc._id,
+    mode: 'INSTANT',
+    startAt: b4Start,
+    endAt: b4End,
+    status: 'IN_PROGRESS',
+    paymentMode: 'PACKAGE',
+    packageId: pkgAarav._id.toString(),
+    idempotencyKey: 'seed-bk-4',
+    priceSnapshot: { tier: 'NORMAL', sessionPaise: 39900, commissionPaise: 3990, totalPaise: 43890, commissionPercent: 10, configVersion: 1 },
+    session: { startedAt: b4Start, endsAt: b4End },
+  });
+
+  await SlotLock.create({ trainerId: t1Id, atomStart: b4Start, bookingId: bk4._id, state: 'CONFIRMED' });
+
+  // Booking 5: Upcoming Confirmed (Priya + Ananya)
+  const b5Start = new Date(now.getTime() + 20 * 60 * 60 * 1000);
+  const b5End = new Date(b5Start.getTime() + 60 * 60 * 1000);
+  const bk5 = await Booking.create({
+    customerId: c2Id,
+    trainerId: t2Id,
+    societyId: greenGlenSoc._id,
+    mode: 'SCHEDULED',
+    startAt: b5Start,
+    endAt: b5End,
+    status: 'CONFIRMED',
+    paymentMode: 'PACKAGE',
+    packageId: pkgPriya._id.toString(),
+    idempotencyKey: 'seed-bk-5',
+    priceSnapshot: { tier: 'NORMAL', sessionPaise: 39900, commissionPaise: 3990, totalPaise: 43890, commissionPercent: 10, configVersion: 1 },
+  });
+
+  await SlotLock.create({ trainerId: t2Id, atomStart: b5Start, bookingId: bk5._id, state: 'CONFIRMED' });
+
+  // Booking 6: Upcoming Confirmed (Neha + Sneha)
+  const b6Start = new Date(now.getTime() + 44 * 60 * 60 * 1000);
+  const b6End = new Date(b6Start.getTime() + 60 * 60 * 1000);
+  const bk6 = await Booking.create({
+    customerId: c4Id,
+    trainerId: t4Id,
+    societyId: sobhaPavilionSoc._id,
+    mode: 'SCHEDULED',
+    startAt: b6Start,
+    endAt: b6End,
+    status: 'CONFIRMED',
+    paymentMode: 'PAYMENT',
+    idempotencyKey: 'seed-bk-6',
+    priceSnapshot: { tier: 'PEAK', sessionPaise: 49900, commissionPaise: 4990, totalPaise: 54890, commissionPercent: 10, configVersion: 1 },
+  });
+
+  await SlotLock.create({ trainerId: t4Id, atomStart: b6Start, bookingId: bk6._id, state: 'CONFIRMED' });
+
+  // Booking 7: Cancelled Booking
+  const b7Start = new Date(now.getTime() - 72 * 60 * 60 * 1000);
+  const b7End = new Date(b7Start.getTime() + 60 * 60 * 1000);
+  await Booking.create({
+    customerId: c5Id,
+    trainerId: t5Id,
+    societyId: prestigeSoc._id,
+    mode: 'SCHEDULED',
+    startAt: b7Start,
+    endAt: b7End,
+    status: 'CANCELLED',
+    paymentMode: 'PAYMENT',
+    idempotencyKey: 'seed-bk-7',
+    cancelledAt: new Date(now.getTime() - 75 * 60 * 60 * 1000),
+    cancelReason: 'Work travel conflict',
+    priceSnapshot: { tier: 'NORMAL', sessionPaise: 39900, commissionPaise: 3990, totalPaise: 43890, commissionPercent: 10, configVersion: 1 },
+  });
+
+  // Assignment Decisions for Admin Console
+  await AssignmentDecision.create({
+    bookingId: bk4._id,
+    requestedAt: new Date(now.getTime() - 20 * 60 * 1000),
+    slotStart: b4Start,
+    societyId: prestigeSoc._id,
+    candidates: [
+      { trainerId: t1Id, trainerName: 'Vikram Singh', distanceKm: 0.2, sessionsToday: 2, rating: 4.9, eligible: true },
+      { trainerId: t5Id, trainerName: 'Rohan Gupta', distanceKm: 0.8, sessionsToday: 1, rating: 4.9, eligible: true },
+    ],
+    chosenTrainerId: t1Id,
+    outcome: 'ASSIGNED',
+  });
+
+  await AssignmentDecision.create({
+    bookingId: bk5._id,
+    requestedAt: new Date(now.getTime() - 2 * 60 * 60 * 1000),
+    slotStart: b5Start,
+    societyId: greenGlenSoc._id,
+    candidates: [
+      { trainerId: t2Id, trainerName: 'Ananya Rao', distanceKm: 0.1, sessionsToday: 1, rating: 4.8, eligible: true },
+      { trainerId: t4Id, trainerName: 'Sneha Patel', distanceKm: 3.2, sessionsToday: 0, rating: 4.7, eligible: true },
+    ],
+    chosenTrainerId: t2Id,
+    outcome: 'ASSIGNED',
+  });
+
+  // Package Ledgers & Notifications
+  await PackageLedger.create({ packageId: pkgAarav._id, bookingId: bk1._id, type: 'CONSUME', sessionsCount: 1 });
+  await PackageLedger.create({ packageId: pkgPriya._id, bookingId: bk2._id, type: 'CONSUME', sessionsCount: 1 });
+  await PackageLedger.create({ packageId: pkgRohan._id, bookingId: bk3._id, type: 'CONSUME', sessionsCount: 1 });
+  await PackageLedger.create({ packageId: pkgAarav._id, bookingId: bk4._id, type: 'CONSUME', sessionsCount: 1 });
+  await PackageLedger.create({ packageId: pkgPriya._id, bookingId: bk5._id, type: 'CONSUME', sessionsCount: 1 });
+
+  await Notification.create({
+    userId: t1Id,
+    type: 'BOOKING_ASSIGNED',
+    bookingId: bk4._id,
+    title: 'Live Instant Session Started',
+    message: 'Doorstep workout in progress at Prestige Ferns Residency, Flat B-304.',
+  });
+
+  await Notification.create({
+    userId: t2Id,
+    type: 'BOOKING_ASSIGNED',
+    bookingId: bk5._id,
+    title: 'Upcoming Session Assigned',
+    message: 'Workout scheduled for tomorrow at Green Glen Layout, Flat A-102.',
+  });
+
+  await Notification.create({
+    userId: c1Id,
+    type: 'SESSION_REMINDER',
+    bookingId: bk4._id,
+    title: 'Workout In Progress',
+    message: 'Your 60-minute doorstep workout with Vikram Singh is currently active.',
+  });
+
+  await disconnectDb();
+  console.log('Database successfully wiped and seeded with real synthetic data across all roles!');
+}
+
+seed().catch((err) => {
+  console.error('Database seeding failed:', err);
+  process.exit(1);
+});
+
+===== FILE: Backend\src\services\ai.service.ts =====
+import { FitnessAssessment } from '../models/FitnessAssessment.js';
+import { SessionRecord } from '../models/SessionRecord.js';
+import { env } from '../config/env.js';
+
+interface WorkoutPlan {
+  workoutTitle: string;
+  focusArea: string;
+  warmUp: string[];
+  mainCircuit: { exercise: string; sets: number; reps: number }[];
+  coolDown: string[];
+  coachNote: string;
+}
+
+type Source = 'NVIDIA' | 'GEMINI' | 'RULES';
+
+// Must stay BELOW the frontend timeout for this call (55s).
+const TOTAL_BUDGET_MS = 35_000;
+
+class ProviderError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+function extractAndParseJson(text: unknown): WorkoutPlan | null {
+  if (typeof text !== 'string' || !text) return null;
+
+  let cleaned = text
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')
+    .replace(/```(?:json)?/gi, '')
+    .trim();
+
+  const first = cleaned.indexOf('{');
+  const last = cleaned.lastIndexOf('}');
+  if (first !== -1 && last > first) cleaned = cleaned.slice(first, last + 1);
+
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (
+      parsed &&
+      typeof parsed.workoutTitle === 'string' &&
+      Array.isArray(parsed.warmUp) &&
+      Array.isArray(parsed.mainCircuit) &&
+      parsed.mainCircuit.length > 0
+    ) {
+      return {
+        workoutTitle: parsed.workoutTitle,
+        focusArea: parsed.focusArea || 'General Fitness',
+        warmUp: parsed.warmUp.map(String),
+        mainCircuit: parsed.mainCircuit.map((item: any) => ({
+          exercise: String(item.exercise || 'Exercise'),
+          sets: Number(item.sets) || 3,
+          reps: Number(item.reps) || 10,
+        })),
+        coolDown: Array.isArray(parsed.coolDown) ? parsed.coolDown.map(String) : ['5 mins light stretching'],
+        coachNote: parsed.coachNote || 'Maintain proper form throughout all sets.',
+      };
+    }
+  } catch {
+    // fall through
+  }
+  return null;
+}
+
+async function callApi(url: string, headers: Record<string, string>, body: unknown, signal: AbortSignal) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: JSON.stringify(body),
+    signal,
+  });
+  if (!response.ok) {
+    const errText = await response.text().catch(() => '');
+    throw new ProviderError(response.status, `HTTP ${response.status}: ${errText.slice(0, 300)}`);
+  }
+  return (await response.json()) as any;
+}
+
+/** Tries the full body first; if the provider rejects an optional param (HTTP 400), retries with the plain body. */
+async function callWithPlainRetry(
+  url: string,
+  headers: Record<string, string>,
+  fullBody: unknown,
+  plainBody: unknown,
+  signal: AbortSignal,
+) {
+  try {
+    return await callApi(url, headers, fullBody, signal);
+  } catch (err) {
+    if (err instanceof ProviderError && err.status === 400 && !signal.aborted) {
+      return await callApi(url, headers, plainBody, signal);
+    }
+    throw err;
+  }
+}
+
+const inFlight = new Map<string, Promise<unknown>>();
+
+/** Double-clicks / refresh spam share one run instead of burning free-tier quota. NEVER throws. */
+export function generateWorkoutRecommendation(customerId: string) {
+  const existing = inFlight.get(customerId);
+  if (existing) return existing as ReturnType<typeof run>;
+  const p = run(customerId).finally(() => inFlight.delete(customerId));
+  inFlight.set(customerId, p);
+  return p;
+}
+
+interface Attempt {
+  source: 'NVIDIA' | 'GEMINI';
+  model: string;
+  capMs: number;
+  call: (signal: AbortSignal) => Promise<string | undefined>;
+}
+
+function rulePlan(level: string, goals: string, focus: string): WorkoutPlan {
+  return {
+    workoutTitle: `${level.toUpperCase()} ${goals} Circuit`,
+    focusArea: focus,
+    warmUp: ['5 mins Jumping Jacks & Arm Circles', '3 mins Dynamic Hip Openers & Bodyweight Squats'],
+    mainCircuit: [
+      { exercise: 'Goblet Squats / Dumbbell Squats', sets: 4, reps: level === 'advanced' ? 12 : 10 },
+      { exercise: 'Push-ups / Dumbbell Chest Press', sets: 3, reps: 10 },
+      { exercise: 'Dumbbell Bent-over Rows', sets: 3, reps: 12 },
+      { exercise: 'Plank Hold', sets: 3, reps: level === 'advanced' ? 60 : 30 },
+    ],
+    coolDown: ['4 mins Hamstring & Quad Stretches', '3 mins Deep Diaphragmatic Breathing'],
+    coachNote: `Tailored for ${level} level. Focus on controlled tempo during compound movements.`,
+  };
+}
+
+async function run(customerId: string) {
+  const startedAt = Date.now();
+  const enrich = (value: WorkoutPlan, source: Source, model: string) => ({
+    ...value,
+    source,
+    model,
+    latencyMs: Date.now() - startedAt,
+  });
+
+  let assessment: Awaited<ReturnType<typeof FitnessAssessment.findOne>> | null = null;
+  let pastRecords: any[] = [];
+  try {
+    assessment = await FitnessAssessment.findOne({ customerId }).sort({ createdAt: -1 });
+    pastRecords = await SessionRecord.find({ customerId }).sort({ createdAt: -1 }).limit(5);
+  } catch (err) {
+    console.warn('[AI] DB read failed, continuing with defaults:', err instanceof Error ? err.message : err);
+  }
+
+  const level = assessment?.level || 'beginner';
+  const goals = assessment?.goals?.join(' & ') || 'General Fitness';
+  const focus = assessment?.preferences?.[0] || 'Full Body Conditioning';
+  const fallback = () => enrich(rulePlan(level, goals, focus), 'RULES', 'deterministic-baseline');
+
+  try {
+    const profileContext = assessment
+      ? `Age: ${assessment.age}, Weight: ${assessment.weightKg}kg, Goals: ${assessment.goals.join(', ')}, Level: ${assessment.level}, Preferences: ${(assessment.preferences ?? []).join(', ')}, Limitations: ${assessment.limitations || 'None'}`
+      : 'New customer without completed assessment profile.';
+
+    const pastWorkoutContext =
+      pastRecords.length > 0
+        ? pastRecords
+            .map(
+              (r, i) =>
+                `Session ${i + 1}: ${r.durationMinutes} min; exercises ${(r.exercises ?? [])
+                  .map((e: any) => `${e.name} ${e.sets}x${e.reps ?? '-'}`)
+                  .join(', ')}; rating ${r.customerRating ?? 'none'}`,
+            )
+            .join('\n')
+        : 'No previous workout records yet.';
+
+    const prompt = `You are a certified fitness coach. Generate ONE personalized 60-minute workout for this customer.
+
+Customer Profile:
+${profileContext}
+
+Recent Sessions:
+${pastWorkoutContext}
+
+Rules: 2-3 warm-up items, 4-5 main exercises, 2 cool-down items, coachNote under 25 words. Short strings only.
+Return ONLY raw JSON (no markdown, no explanation) with exactly this schema:
+{"workoutTitle":"string","focusArea":"string","warmUp":["string"],"mainCircuit":[{"exercise":"string","sets":3,"reps":10}],"coolDown":["string"],"coachNote":"string"}`;
+
+    // ---- NVIDIA lane (GLM first, small fast model last) ---------------------------
+    const nvidiaLane: Attempt[] = [];
+    const nvidiaKey = env.NVIDIA_API_KEY?.trim();
+    if (nvidiaKey && !nvidiaKey.includes('your-nvidia-api-key')) {
+      const baseUrl = (env.NVIDIA_BASE_URL || 'https://integrate.api.nvidia.com/v1').replace(/\/+$/, '');
+      const models = [
+        env.NVIDIA_MODEL || 'z-ai/glm-5.2',
+        'z-ai/glm-5.2',
+        'z-ai/glm-5.1',
+        'nvidia/nemotron-3-nano-30b-a3b',
+      ].filter((m, i, arr) => arr.indexOf(m) === i);
+
+      for (const model of models) {
+        nvidiaLane.push({
+          source: 'NVIDIA',
+          model,
+          capMs: 12_000,
+          call: async (signal) => {
+            const base = {
+              model,
+              messages: [{ role: 'user', content: prompt }],
+              temperature: 0.2,
+              max_tokens: 1024,
+              stream: false,
+            };
+            const data = await callWithPlainRetry(
+              `${baseUrl}/chat/completions`,
+              { Authorization: `Bearer ${nvidiaKey}`, Accept: 'application/json' },
+              { ...base, chat_template_kwargs: { enable_thinking: false } }, // turn off slow reasoning
+              base,
+              signal,
+            );
+            return data.choices?.[0]?.message?.content;
+          },
+        });
+      }
+    }
+
+    // ---- Gemini lane (best fast model, then lite) ---------------------------------
+    const geminiLane: Attempt[] = [];
+    const geminiKey = env.LLM_API_KEY?.trim();
+    if (geminiKey && !geminiKey.includes('your-gemini-api-key') && geminiKey !== 'your_gemini_or_llm_api_key_here') {
+      const candidates: { model: string; capMs: number; thinking: boolean }[] = [
+        { model: env.LLM_MODEL || 'gemini-3.8-flash', capMs: 15_000, thinking: true },
+        { model: 'gemini-3.5-flash-lite', capMs: 12_000, thinking: false },
+        { model: 'gemini-3.6-flash', capMs: 12_000, thinking: false },
+      ].filter((m, i, arr) => arr.findIndex((x) => x.model === m.model) === i);
+
+      for (const g of candidates) {
+        geminiLane.push({
+          source: 'GEMINI',
+          model: g.model,
+          capMs: g.capMs,
+          call: async (signal) => {
+            const url = `https://generativelanguage.googleapis.com/v1beta/models/${g.model}:generateContent`;
+            const headers = { 'x-goog-api-key': geminiKey };
+            const gen = { responseMimeType: 'application/json', temperature: 0.2, maxOutputTokens: 1536 };
+            const contents = [{ role: 'user', parts: [{ text: prompt }] }];
+            const data = await callWithPlainRetry(
+              url,
+              headers,
+              {
+                contents,
+                generationConfig: { ...gen, ...(g.thinking ? { thinkingConfig: { thinkingLevel: 'low' } } : {}) },
+              },
+              { contents, generationConfig: gen },
+              signal,
+            );
+            const parts: { text?: string; thought?: boolean }[] = data.candidates?.[0]?.content?.parts ?? [];
+            return parts.filter((p) => !p.thought).map((p) => p.text ?? '').join('');
+          },
+        });
+      }
+    }
+
+    // ---- Race both lanes at once inside one deadline ------------------------------
+    const controller = new AbortController();
+    const deadlineTimer = setTimeout(() => controller.abort(), TOTAL_BUDGET_MS);
+
+    async function runLane(lane: Attempt[]) {
+      for (const a of lane) {
+        if (controller.signal.aborted) break;
+        const t0 = Date.now();
+        try {
+          const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(a.capMs)]);
+          const text = await a.call(signal);
+          const plan = extractAndParseJson(text);
+          if (plan) {
+            console.log(`[AI] ${a.source} ${a.model} OK in ${Date.now() - t0}ms`);
+            return { plan, source: a.source, model: a.model };
+          }
+          console.warn(`[AI] ${a.source} ${a.model} unparseable output after ${Date.now() - t0}ms`);
+        } catch (err) {
+          if (controller.signal.aborted) break;
+          const msg = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+          console.warn(`[AI] ${a.source} ${a.model} failed after ${Date.now() - t0}ms (${msg.slice(0, 200)})`);
+        }
+      }
+      throw new Error('lane exhausted');
+    }
+
+    const lanes: Promise<{ plan: WorkoutPlan; source: 'NVIDIA' | 'GEMINI'; model: string }>[] = [];
+    if (geminiLane.length) lanes.push(runLane(geminiLane));
+    if (nvidiaLane.length) lanes.push(runLane(nvidiaLane));
+
+    try {
+      if (lanes.length > 0) {
+        const winner = await Promise.any(lanes);
+        return enrich(winner.plan, winner.source, winner.model);
+      }
+    } catch {
+      console.warn('[AI] All AI providers failed or timed out, using rule-based plan');
+    } finally {
+      clearTimeout(deadlineTimer);
+      controller.abort();
+    }
+  } catch (err) {
+    console.error('[AI] Unexpected error, using rule-based plan:', err);
+  }
+
+  return fallback();
+}
+
+===== FILE: Backend\src\services\assessment.service.ts =====
+import { CustomerProfile } from '../models/CustomerProfile.js';
+import { FitnessAssessment } from '../models/FitnessAssessment.js';
+import type { FitnessLevel } from '../models/FitnessAssessment.js';
+
+export interface SaveAssessmentInput {
+  customerId: string;
+  societyId: string;
+  flatNumber?: string;
+  phone?: string;
+  age: number;
+  weightKg: number;
+  goals: string[];
+  level: FitnessLevel;
+  preferences: string[];
+  limitations?: string;
+}
+
+export async function getLatestAssessment(customerId: string) {
+  const profile = await CustomerProfile.findOne({ userId: customerId }).populate('societyId');
+  const assessment = await FitnessAssessment.findOne({ customerId }).sort({ version: -1 });
+  return { profile, assessment };
+}
+
+export async function saveAssessment(input: SaveAssessmentInput) {
+  await CustomerProfile.updateOne(
+    { userId: input.customerId },
+    {
+      $set: {
+        societyId: input.societyId,
+        flatNumber: input.flatNumber,
+        phone: input.phone,
+      },
+    },
+    { upsert: true },
+  );
+
+  const latest = await FitnessAssessment.findOne({ customerId: input.customerId }).sort({ version: -1 });
+  const nextVersion = latest ? latest.version + 1 : 1;
+
+  const newAssessment = await FitnessAssessment.create({
+    customerId: input.customerId,
+    version: nextVersion,
+    age: input.age,
+    weightKg: input.weightKg,
+    goals: input.goals,
+    level: input.level,
+    preferences: input.preferences,
+    limitations: input.limitations,
+  });
+
+  return newAssessment;
+}
+
+===== FILE: Backend\src\services\assignment.service.ts =====
+import { Society } from '../models/Society.js';
+import { TrainerProfile } from '../models/TrainerProfile.js';
+import { User } from '../models/User.js';
+import { Booking } from '../models/Booking.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { calculateHaversineDistance } from '../utils/geo.js';
+import { getSessionAtoms, parseTimeToMinutes } from './time.js';
+import { getIstWeekdayAndMinutes } from './peak.js';
+
+export interface EvaluatedCandidate {
+  trainerId: string;
+  trainerName: string;
+  distanceKm: number;
+  sessionsToday: number;
+  rating: number;
+  eligible: boolean;
+  reason?: string;
+}
+
+export interface SelectionResult {
+  candidates: EvaluatedCandidate[];
+  chosenTrainerId?: string;
+  preferredHonored: boolean;
+}
+
+export function rankCandidates(
+  candidates: EvaluatedCandidate[],
+  preferredTrainerId?: string,
+): { chosenId?: string; chosenTrainerId?: string; preferredHonored: boolean } {
+  const eligible = candidates.filter((c) => c.eligible);
+  if (eligible.length === 0) return { preferredHonored: false };
+
+  if (preferredTrainerId) {
+    const pref = eligible.find((c) => c.trainerId === preferredTrainerId);
+    if (pref) {
+      return {
+        chosenId: pref.trainerId,
+        chosenTrainerId: pref.trainerId,
+        preferredHonored: true,
+      };
+    }
+  }
+
+  eligible.sort((a, b) => {
+    if (a.distanceKm !== b.distanceKm) return a.distanceKm - b.distanceKm;
+    if (a.sessionsToday !== b.sessionsToday) return a.sessionsToday - b.sessionsToday;
+    if (b.rating !== a.rating) return b.rating - a.rating;
+    return a.trainerId.localeCompare(b.trainerId);
+  });
+
+  const chosen = eligible[0]?.trainerId;
+  return {
+    chosenId: chosen,
+    chosenTrainerId: chosen,
+    preferredHonored: false,
+  };
+}
+
+export async function findBestTrainerForSlot(
+  societyId: string,
+  slotStart: Date,
+  preferredTrainerId?: string,
+): Promise<SelectionResult> {
+  const society = await Society.findById(societyId);
+  if (!society) return { candidates: [], preferredHonored: false };
+
+  const trainers = await TrainerProfile.find({ zoneIds: society.zoneId, isActive: true });
+  const atoms = getSessionAtoms(slotStart);
+
+  const dayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(slotStart);
+  const startOfDay = new Date(`${dayKey}T00:00:00+05:30`);
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
+
+  const evaluated: EvaluatedCandidate[] = [];
+
+  for (const t of trainers) {
+    const user = await User.findById(t.userId);
+    const trainerName = user ? user.name : 'Trainer';
+    const distanceKm = calculateHaversineDistance(
+      society.location.lat,
+      society.location.lng,
+      t.baseLocation.lat,
+      t.baseLocation.lng,
+    );
+
+    const sessionsToday = await Booking.countDocuments({
+      trainerId: t.userId,
+      startAt: { $gte: startOfDay,$lte: endOfDay },
+      status: { $in: ['CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS', 'COMPLETED'] },
+    });
+
+    let eligible = true;
+    let reason: string | undefined;
+
+    const { weekday, minutes } = getIstWeekdayAndMinutes(slotStart);
+    const endMinutes = minutes + 60;
+
+    const covers = t.weeklyAvailability.some((w) => {
+      if (w.weekday !== weekday) return false;
+      const wStart = parseTimeToMinutes(w.start);
+      const wEnd = parseTimeToMinutes(w.end);
+      return minutes >= wStart && endMinutes <= wEnd;
+    });
+
+    if (!covers) {
+      eligible = false;
+      reason = 'Outside working hours';
+    }
+
+    if (eligible) {
+      const isOff = t.timeOff.some((to) => slotStart >= to.from && slotStart < to.to);
+      if (isOff) {
+        eligible = false;
+        reason = 'On time off';
+      }
+    }
+
+    if (eligible) {
+      const lockedCount = await SlotLock.countDocuments({
+        trainerId: t.userId,
+        atomStart: { $in: atoms },
+      });
+      if (lockedCount > 0) {
+        eligible = false;
+        reason = 'Already booked for this slot';
+      }
+    }
+
+    evaluated.push({
+      trainerId: t.userId,
+      trainerName,
+      distanceKm,
+      sessionsToday,
+      rating: t.rating,
+      eligible,
+      reason,
+    });
+  }
+
+  const { chosenTrainerId, preferredHonored } = rankCandidates(evaluated, preferredTrainerId);
+
+  return {
+    candidates: evaluated,
+    chosenTrainerId,
+    preferredHonored,
+  };
+}
+
+===== FILE: Backend\src\services\availability.service.ts =====
+import { TrainerProfile } from '../models/TrainerProfile.js';
+import type { WeeklySlot } from '../models/TrainerProfile.js';
+import { parseTimeToMinutes } from './time.js';
+import { AppError } from '../utils/AppError.js';
+import { Booking } from '../models/Booking.js';
+
+export async function getTrainerProfileByUserId(userId: string) {
+  let profile = await TrainerProfile.findOne({ userId });
+  if (!profile) {
+    profile = await TrainerProfile.create({
+      userId,
+      zoneIds: ['zone-bangalore-south', 'zone-bangalore-east'],
+      baseLocation: { lat: 12.9121, lng: 77.6445 },
+      rating: 4.9,
+      bio: 'Certified personal trainer specializing in functional fitness and strength.',
+      isActive: true,
+      weeklyAvailability: [
+        { weekday: 1, start: '06:00', end: '12:00' },
+        { weekday: 1, start: '16:00', end: '20:00' },
+        { weekday: 2, start: '06:00', end: '12:00' },
+        { weekday: 2, start: '16:00', end: '20:00' },
+        { weekday: 3, start: '06:00', end: '12:00' },
+        { weekday: 3, start: '16:00', end: '20:00' },
+        { weekday: 4, start: '06:00', end: '12:00' },
+        { weekday: 4, start: '16:00', end: '20:00' },
+        { weekday: 5, start: '06:00', end: '12:00' },
+        { weekday: 5, start: '16:00', end: '20:00' },
+        { weekday: 6, start: '07:00', end: '12:00' },
+      ],
+      timeOff: [],
+    });
+  }
+  return profile;
+}
+
+export async function updateWeeklyAvailability(userId: string, slots: WeeklySlot[]) {
+  for (const slot of slots) {
+    const startM = parseTimeToMinutes(slot.start);
+    const endM = parseTimeToMinutes(slot.end);
+    if (startM >= endM) {
+      throw new AppError(400, 'INVALID_TIME_RANGE', `Start time (${slot.start}) must be before end time (${slot.end})`);
+    }
+  }
+
+  const profile = await TrainerProfile.findOneAndUpdate(
+    { userId },
+    { $set: { weeklyAvailability: slots } },
+    { returnDocument: 'after', upsert: true },
+  );
+
+  return profile;
+}
+
+export async function addTimeOffBlock(userId: string, from: Date, to: Date, reason?: string) {
+  if (from >= to) {
+    throw new AppError(400, 'INVALID_TIME_RANGE', 'Time-off start date must be before end date');
+  }
+  const conflict = await Booking.exists({ trainerId: userId, status: { $in: ['PENDING_PAYMENT', 'CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS'] }, startAt: { $lt: to }, endAt: { $gt: from } });
+  if (conflict) throw new AppError(409, 'BOOKING_CONFLICT', 'This time off overlaps an assigned booking');
+
+  const profile = await TrainerProfile.findOneAndUpdate(
+    { userId },
+    { $push: { timeOff: { from, to, reason } } },
+    { returnDocument: 'after', upsert: true },
+  );
+
+  return profile;
+}
+
+export async function removeTimeOffBlock(userId: string, timeOffId: string) {
+  const profile = await TrainerProfile.findOneAndUpdate(
+    { userId },
+    { $pull: { timeOff: { _id: timeOffId } } },
+    { returnDocument: 'after' },
+  );
+
+  return profile;
+}
+
+
+===== FILE: Backend\src\services\booking.service.ts =====
+import mongoose from 'mongoose';
+import { Booking } from '../models/Booking.js';
+import type { BookingMode } from '../models/Booking.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { AssignmentDecision } from '../models/AssignmentDecision.js';
+import { findBestTrainerForSlot } from './assignment.service.js';
+import { calculateQuoteForDate } from './pricing.service.js';
+import { ceilToAtom, getSessionAtoms } from './time.js';
+import { sendNotification } from './notification.service.js';
+import { AppError } from '../utils/AppError.js';
+import { formatIst } from '../utils/timeFormat.js';
+import { consumePackageForBooking } from './package.service.js';
+
+export interface CreateBookingInput {
+  customerId: string;
+  societyId: string;
+  mode: BookingMode;
+  startAt: Date;
+  preferredTrainerId?: string;
+  idempotencyKey?: string;
+  paymentMode: 'PAYMENT' | 'PACKAGE';
+  packageId?: string;
+}
+
+export async function createBooking(input: CreateBookingInput) {
+  if (input.idempotencyKey) {
+    const existing = await Booking.findOne({
+      customerId: input.customerId,
+      idempotencyKey: input.idempotencyKey,
+    }).populate('societyId');
+    if (existing) return existing;
+  }
+
+  const now = new Date();
+  const minStart = new Date(now.getTime() + 10 * 60 * 1000);
+  const maxHorizon = new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+  if (input.startAt < minStart) {
+    throw new AppError(400, 'INVALID_SLOT_TIME', 'Booking must be made at least 10 minutes in advance');
+  }
+  if (input.startAt > maxHorizon) {
+    throw new AppError(400, 'INVALID_SLOT_TIME', 'Bookings cannot be made more than 30 days in advance');
+  }
+
+  if (input.mode === 'INSTANT') {
+    const maxInstantTime = new Date(now.getTime() + 60 * 60 * 1000);
+    if (input.startAt > maxInstantTime) {
+      throw new AppError(400, 'INVALID_INSTANT_SLOT', 'Instant bookings must start within 60 minutes');
+    }
+  }
+
+  const roundedStart = ceilToAtom(input.startAt);
+  const roundedEnd = new Date(roundedStart.getTime() + 60 * 60 * 1000);
+
+  const overlappingCustomerBooking = await Booking.exists({
+    customerId: input.customerId,
+    status: { $in: ['PENDING_PAYMENT', 'CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS'] },
+    startAt: { $lt: roundedEnd },
+    endAt: { $gt: roundedStart },
+  });
+
+  if (overlappingCustomerBooking) {
+    throw new AppError(409, 'CUSTOMER_OVERLAP', 'You already have an active booking during this time slot');
+  }
+
+  const quote = await calculateQuoteForDate(roundedStart);
+  const selection = await findBestTrainerForSlot(input.societyId, roundedStart, input.preferredTrainerId);
+
+  if (!selection.chosenTrainerId) {
+    await AssignmentDecision.create({
+      requestedAt: now,
+      slotStart: roundedStart,
+      societyId: input.societyId,
+      candidates: selection.candidates,
+      outcome: 'NO_TRAINER',
+    });
+    throw new AppError(409, 'NO_TRAINER_AVAILABLE', 'No trainer is available for this slot. Try another time.');
+  }
+
+  const chosenTrainerId = selection.chosenTrainerId;
+  const atoms = getSessionAtoms(roundedStart);
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const bookingDoc = new Booking({
+      customerId: input.customerId,
+      trainerId: chosenTrainerId,
+      societyId: input.societyId,
+      mode: input.mode,
+      startAt: roundedStart,
+      endAt: roundedEnd,
+      status: input.paymentMode === 'PACKAGE' ? 'CONFIRMED' : 'PENDING_PAYMENT',
+      paymentMode: input.paymentMode,
+      holdExpiresAt: input.paymentMode === 'PAYMENT' ? new Date(now.getTime() + 10 * 60 * 1000) : undefined,
+      priceSnapshot: {
+        tier: quote.tier,
+        sessionPaise: quote.sessionPaise,
+        commissionPaise: quote.commissionPaise,
+        totalPaise: quote.totalPaise,
+        commissionPercent: quote.commissionPercent,
+        configVersion: quote.configVersion,
+      },
+      preferredTrainerId: input.preferredTrainerId,
+      preferredHonored: selection.preferredHonored,
+      idempotencyKey: input.idempotencyKey,
+    });
+
+    await bookingDoc.save({ session });
+
+    const locks = atoms.map((atom) => ({
+      trainerId: chosenTrainerId,
+      atomStart: atom,
+      bookingId: bookingDoc._id,
+      state: input.paymentMode === 'PACKAGE' ? ('CONFIRMED' as const) : ('HELD' as const),
+      holdExpiresAt: input.paymentMode === 'PAYMENT' ? bookingDoc.holdExpiresAt : undefined,
+    }));
+
+    await SlotLock.insertMany(locks, { session });
+
+    if (input.paymentMode === 'PACKAGE') {
+      const pkg = await consumePackageForBooking(input.customerId, bookingDoc._id.toString(), session, input.packageId);
+      bookingDoc.packageId = pkg._id.toString();
+      await bookingDoc.save({ session });
+    }
+
+    await AssignmentDecision.create(
+      [
+        {
+          bookingId: bookingDoc._id,
+          requestedAt: now,
+          slotStart: roundedStart,
+          societyId: input.societyId,
+          candidates: selection.candidates,
+          chosenTrainerId,
+          outcome: 'ASSIGNED',
+        },
+      ],
+      { session },
+    );
+
+    await session.commitTransaction();
+    session.endSession();
+
+    if (input.paymentMode === 'PACKAGE') {
+      await sendNotification(chosenTrainerId, 'BOOKING_ASSIGNED', `New workout session assigned for ${formatIst(roundedStart)}.`, bookingDoc._id.toString());
+    }
+
+    return bookingDoc;
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+
+    if (typeof err === 'object' && err !== null && 'code' in err && err.code === 11000) {
+      throw new AppError(409, 'SLOT_ALREADY_BOOKED', 'The slot was just claimed by another booking. Please try again.');
+    }
+    throw err;
+  }
+}
+
+
+===== FILE: Backend\src\services\cancellation.service.ts =====
+import mongoose from 'mongoose';
+import { Booking } from '../models/Booking.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { CustomerPackage } from '../models/CustomerPackage.js';
+import { PackageLedger } from '../models/PackageLedger.js';
+import { sendNotification } from './notification.service.js';
+import { findBestTrainerForSlot } from './assignment.service.js';
+import { ceilToAtom, getSessionAtoms } from './time.js';
+import { AppError } from '../utils/AppError.js';
+import { formatIst } from '../utils/timeFormat.js';
+import { Payment } from '../models/Payment.js';
+
+const CANCELLATION_WINDOW_HOURS = 2;
+
+export async function cancelBooking(bookingId: string, userId: string, reason?: string) {
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const booking = await Booking.findById(bookingId).session(session);
+    if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+
+    if (booking.customerId !== userId && booking.trainerId !== userId) {
+      throw new AppError(403, 'FORBIDDEN', 'You cannot cancel this booking');
+    }
+
+    if (['CANCELLED', 'COMPLETED', 'IN_PROGRESS'].includes(booking.status)) {
+      throw new AppError(400, 'INVALID_STATUS', `Cannot cancel a ${booking.status.toLowerCase()} booking`);
+    }
+
+    const now = new Date();
+    const previousStatus = booking.status;
+    const hoursUntilStart = (booking.startAt.getTime() - now.getTime()) / (1000 * 60 * 60);
+
+    const eligibleForRefund = hoursUntilStart >= CANCELLATION_WINDOW_HOURS || userId === booking.trainerId;
+    let restoreCredit = false;
+    if (booking.paymentMode === 'PACKAGE' && booking.packageId) {
+      if (eligibleForRefund) {
+        restoreCredit = true;
+      }
+    }
+
+    if (restoreCredit && booking.packageId) {
+      await PackageLedger.create(
+        [
+          {
+            packageId: booking.packageId,
+            bookingId: booking._id,
+            type: 'RESTORE',
+            sessionsCount: 1,
+          },
+        ],
+        { session },
+      );
+
+      await CustomerPackage.findByIdAndUpdate(booking.packageId, { $inc: { usedSessions: -1 } }, { session });
+    }
+
+    await SlotLock.deleteMany({ bookingId: booking._id }, { session });
+
+    booking.status = 'CANCELLED';
+    booking.cancelledAt = now;
+    booking.cancelReason = reason ?? 'Cancelled by user';
+    await booking.save({ session });
+
+    let refunded = false;
+    if (booking.paymentMode === 'PAYMENT' && eligibleForRefund && previousStatus !== 'PENDING_PAYMENT') {
+      const payment = await Payment.findOne({ bookingId: booking._id, status: 'PAID' }).session(session);
+      if (payment) {
+        payment.status = 'REFUNDED';
+        payment.refundedAt = now;
+        payment.refundId = `demo_refund_${payment._id.toString()}`;
+        await payment.save({ session });
+        refunded = true;
+      }
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    await sendNotification(
+      booking.trainerId,
+      'BOOKING_CANCELLED',
+      `Booking for ${formatIst(booking.startAt)} was cancelled.`,
+      booking._id.toString(),
+    );
+
+    await sendNotification(
+      booking.customerId,
+      'BOOKING_CANCELLED',
+      `Your booking for ${formatIst(booking.startAt)} has been cancelled.${restoreCredit ? ' 1 package session restored.' : ''}`,
+      booking._id.toString(),
+    );
+
+    return { booking, outcome: { refunded, creditRestored: restoreCredit, eligibleForRefund } };
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err;
+  }
+}
+
+export async function rescheduleBooking(bookingId: string, customerId: string, newStartAt: Date) {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+
+  if (booking.customerId !== customerId) {
+    throw new AppError(403, 'FORBIDDEN', 'You do not own this booking');
+  }
+
+  if (booking.status !== 'CONFIRMED') {
+    throw new AppError(400, 'INVALID_STATUS', 'Only confirmed bookings can be rescheduled');
+  }
+  if (booking.rescheduleCount >= 2) throw new AppError(409, 'RESCHEDULE_LIMIT', 'A booking can be rescheduled at most twice');
+  if (booking.startAt.getTime() - Date.now() < CANCELLATION_WINDOW_HOURS * 60 * 60 * 1000) {
+    throw new AppError(409, 'RESCHEDULE_WINDOW', 'Reschedule at least 2 hours before the session');
+  }
+
+  const roundedStart = ceilToAtom(newStartAt);
+  const roundedEnd = new Date(roundedStart.getTime() + 60 * 60 * 1000);
+
+  // Remove this booking's own locks before ranking so a short shift is not falsely considered busy.
+  await SlotLock.deleteMany({ bookingId: booking._id });
+  const selection = await findBestTrainerForSlot(
+    booking.societyId.toString(),
+    roundedStart,
+    booking.preferredTrainerId,
+  );
+
+  if (!selection.chosenTrainerId) {
+    // Restore the original locks when no candidate is available.
+    await SlotLock.insertMany(getSessionAtoms(booking.startAt).map((atom) => ({ trainerId: booking.trainerId, atomStart: atom, bookingId: booking._id, state: 'CONFIRMED' as const })));
+    throw new AppError(409, 'NO_TRAINER_AVAILABLE', 'No trainer available for the requested new time.');
+  }
+
+  const session = await mongoose.startSession();
+  session.startTransaction();
+
+  try {
+    const newAtoms = getSessionAtoms(roundedStart);
+    const locks = newAtoms.map((atom) => ({
+      trainerId: selection.chosenTrainerId!,
+      atomStart: atom,
+      bookingId: booking._id,
+      state: 'CONFIRMED' as const,
+    }));
+
+    await SlotLock.insertMany(locks, { session });
+
+    booking.trainerId = selection.chosenTrainerId;
+    booking.startAt = roundedStart;
+    booking.endAt = roundedEnd;
+    booking.rescheduleCount += 1;
+    await booking.save({ session });
+
+    await session.commitTransaction();
+    session.endSession();
+
+    await Promise.all([
+      sendNotification(
+      booking.customerId,
+      'BOOKING_RESCHEDULED',
+      `Your session has been rescheduled to ${formatIst(roundedStart)}.`,
+      booking._id.toString(),
+      ),
+      sendNotification(booking.trainerId, 'BOOKING_RESCHEDULED', `Session rescheduled to ${formatIst(roundedStart)}.`, booking._id.toString()),
+    ]);
+
+    return booking;
+  } catch (err) {
+    await session.abortTransaction();
+    session.endSession();
+    throw err;
+  }
+}
+
+
+===== FILE: Backend\src\services\notification.service.ts =====
+import { Notification } from '../models/Notification.js';
+import type { NotificationType } from '../models/Notification.js';
+
+export async function sendNotification(
+  userId: string,
+  type: NotificationType,
+  message: string,
+  bookingId?: string,
+  options?: { title?: string; data?: Record<string, unknown> },
+) {
+  return await Notification.create({
+    userId,
+    type,
+    message,
+    bookingId,
+    title: options?.title,
+    data: options?.data,
+  });
+}
+
+export async function getUserNotifications(userId: string) {
+  return await Notification.find({ userId }).sort({ createdAt: -1 }).limit(30);
+}
+
+export async function markNotificationAsRead(notificationId: string, userId: string) {
+  return await Notification.findOneAndUpdate(
+    { _id: notificationId, userId },
+    { $set: { readAt: new Date() } },
+    { returnDocument: 'after' },
+  );
+}
+
+export async function markAllNotificationsAsRead(userId: string) {
+  return Notification.updateMany({ userId, readAt: { $exists: false } }, { $set: { readAt: new Date() } });
+}
+
+
+===== FILE: Backend\src\services\package.service.ts =====
+import mongoose from 'mongoose';
+import type { HydratedDocument } from 'mongoose';
+import { CustomerPackage } from '../models/CustomerPackage.js';
+import { PackageTemplate } from '../models/PackageTemplate.js';
+import { PackageLedger } from '../models/PackageLedger.js';
+import type { IPayment } from '../models/Payment.js';
+import { AppError } from '../utils/AppError.js';
+
+function isDuplicateKey(err: unknown): boolean {
+  return typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
+}
+
+export async function getPackagesForCustomer(customerId: string) {
+  return CustomerPackage.find({ customerId }).sort({ expiresAt: 1 });
+}
+
+/**
+ * Creates the package for a VERIFIED payment. Safe to call many times:
+ * the unique index on paymentId guarantees one package per payment.
+ */
+export async function fulfilPackagePurchase(payment: HydratedDocument<IPayment>) {
+  const existing = await CustomerPackage.findOne({ paymentId: payment._id });
+  if (existing) return existing;
+
+  const template = await PackageTemplate.findById(payment.packageTemplateId);
+  if (!template || !template.isActive) {
+    throw new AppError(404, 'NOT_FOUND', 'Package template not available');
+  }
+
+  const now = new Date();
+  const expiresAt = new Date(now.getTime() + template.validityDays * 24 * 60 * 60 * 1000);
+
+  try {
+    return await CustomerPackage.create({
+      customerId: payment.customerId,
+      templateId: template._id,
+      packageName: template.name,
+      totalSessions: template.sessions,
+      usedSessions: 0,
+      purchasedAt: now,
+      expiresAt,
+      paymentId: payment._id,
+    });
+  } catch (err) {
+    if (isDuplicateKey(err)) {
+      const created = await CustomerPackage.findOne({ paymentId: payment._id });
+      if (created) return created;
+    }
+    throw err;
+  }
+}
+
+/** Atomically consumes one credit, choosing the soonest-expiring usable package by default. */
+export async function consumePackageForBooking(
+  customerId: string,
+  bookingId: string,
+  session: mongoose.ClientSession,
+  requestedPackageId?: string,
+) {
+  const now = new Date();
+  const eligibility = {
+    customerId,
+    expiresAt: { $gt: now },
+    $expr: { $lt: ['$usedSessions', '$totalSessions'] },
+  };
+  const filter = requestedPackageId ? { ...eligibility, _id: requestedPackageId } : eligibility;
+  const pkg = await CustomerPackage.findOneAndUpdate(filter, { $inc: { usedSessions: 1 } }, {
+    session,
+    sort: { expiresAt: 1 },
+    returnDocument: 'after',
+  });
+  if (!pkg) throw new AppError(409, 'PACKAGE_UNAVAILABLE', 'No usable package credit is available');
+
+  try {
+    await PackageLedger.create([{ packageId: pkg._id, bookingId, type: 'CONSUME', sessionsCount: 1 }], { session });
+  } catch (err) {
+    if (isDuplicateKey(err)) throw new AppError(409, 'ALREADY_DEDUCTED', 'This booking already used a package credit');
+    throw err;
+  }
+  return pkg;
+}
+
+
+===== FILE: Backend\src\services\payment.service.ts =====
+import crypto from 'node:crypto';
+import Razorpay from 'razorpay';
+import { env } from '../config/env.js';
+import { Booking } from '../models/Booking.js';
+import { PackageTemplate } from '../models/PackageTemplate.js';
+import { Payment } from '../models/Payment.js';
+import type { PaymentPurpose } from '../models/Payment.js';
+import { fulfilPackagePurchase } from './package.service.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { sendNotification } from './notification.service.js';
+import { formatIst } from '../utils/timeFormat.js';
+import { AppError } from '../utils/AppError.js';
+
+/** Razorpay signature = HMAC-SHA256(secret, "orderId|paymentId"), hex encoded. */
+export function computeRazorpaySignature(orderId: string, paymentId: string, secret: string): string {
+  return crypto.createHmac('sha256', secret).update(`${orderId}|${paymentId}`).digest('hex');
+}
+
+/** Constant-time comparison. Anything that is not the exact HMAC (including test strings) is rejected. */
+export function isValidRazorpaySignature(
+  orderId: string,
+  paymentId: string,
+  signature: string,
+  secret: string,
+): boolean {
+  const expected = Buffer.from(computeRazorpaySignature(orderId, paymentId, secret), 'utf8');
+  const given = Buffer.from(signature, 'utf8');
+  if (expected.length !== given.length) return false;
+  return crypto.timingSafeEqual(expected, given);
+}
+
+function getRazorpayCredentials(): { keyId: string; keySecret: string } {
+  if (!env.RAZORPAY_KEY_ID || !env.RAZORPAY_KEY_SECRET) {
+    throw new AppError(503, 'PAYMENTS_NOT_CONFIGURED', 'Payments are not configured on this server');
+  }
+  return { keyId: env.RAZORPAY_KEY_ID, keySecret: env.RAZORPAY_KEY_SECRET };
+}
+
+export interface CreateOrderInput {
+  bookingId?: string;
+  packageTemplateId?: string;
+}
+
+export async function createPaymentOrder(customerId: string, input: CreateOrderInput) {
+  const { bookingId, packageTemplateId } = input;
+  if ((bookingId ? 1 : 0) + (packageTemplateId ? 1 : 0) !== 1) {
+    throw new AppError(400, 'BAD_REQUEST', 'Provide exactly one of bookingId or packageTemplateId');
+  }
+
+  const { keyId, keySecret } = getRazorpayCredentials();
+
+  let purpose: PaymentPurpose;
+  let amountPaise: number;
+  let receipt: string;
+
+  if (bookingId) {
+    const booking = await Booking.findById(bookingId);
+    // Same message for "missing" and "someone else's" so booking IDs cannot be probed.
+    if (!booking || booking.customerId !== customerId) {
+      throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+    }
+    if (booking.paymentMode !== 'PAYMENT') {
+      throw new AppError(400, 'BAD_REQUEST', 'This booking is not paid by card or UPI');
+    }
+    if (!['PENDING_PAYMENT', 'CONFIRMED'].includes(booking.status)) {
+      throw new AppError(409, 'INVALID_STATUS', `A ${booking.status.toLowerCase()} booking cannot be paid`);
+    }
+    if (await Payment.exists({ bookingId: booking._id, status: 'PAID' })) {
+      throw new AppError(409, 'ALREADY_PAID', 'This booking is already paid');
+    }
+    purpose = 'BOOKING';
+    amountPaise = booking.priceSnapshot.totalPaise; // always from the server-side snapshot
+    receipt = `bk_${booking._id.toString()}`;
+  } else {
+    const template = await PackageTemplate.findById(packageTemplateId);
+    if (!template || !template.isActive) throw new AppError(404, 'NOT_FOUND', 'Package template not found');
+    purpose = 'PACKAGE';
+    amountPaise = template.pricePaise;
+    receipt = `pk_${template._id.toString()}`;
+  }
+
+  let razorpayOrderId: string;
+  try {
+    const client = new Razorpay({ key_id: keyId, key_secret: keySecret });
+    const order = await client.orders.create({ amount: amountPaise, currency: 'INR', receipt });
+    razorpayOrderId = order.id;
+  } catch (err) {
+    console.error('Razorpay order creation failed:', err);
+    throw new AppError(502, 'PAYMENT_PROVIDER_ERROR', 'Could not start the payment. Please try again.');
+  }
+
+  const payment = await Payment.create({
+    bookingId,
+    packageTemplateId,
+    purpose,
+    customerId,
+    razorpayOrderId,
+    amountPaise,
+    status: 'CREATED',
+    signatureVerified: false,
+  });
+
+  return {
+    paymentId: payment._id.toString(),
+    orderId: razorpayOrderId,
+    amountPaise,
+    keyId,
+  };
+}
+
+export interface VerifyInput {
+  orderId: string;
+  paymentId: string;
+  signature: string;
+}
+
+async function fulfilPayment(payment: InstanceType<typeof Payment>) {
+  if (payment.purpose === 'PACKAGE') {
+    const customerPackage = await fulfilPackagePurchase(payment);
+    return { payment, package: customerPackage };
+  }
+
+  if (payment.bookingId) {
+    const now = new Date();
+    const booking = await Booking.findOneAndUpdate(
+      { _id: payment.bookingId, status: 'PENDING_PAYMENT', holdExpiresAt: { $gt: now } },
+      { $set: { status: 'CONFIRMED' }, $unset: { holdExpiresAt: 1 } },
+      { returnDocument: 'after' },
+    );
+    if (!booking) throw new AppError(409, 'HOLD_EXPIRED', 'This payment hold expired. Please make a new booking.');
+    await SlotLock.updateMany({ bookingId: booking._id, state: 'HELD' }, { $set: { state: 'CONFIRMED' }, $unset: { holdExpiresAt: 1 } });
+    await sendNotification(booking.trainerId, 'BOOKING_ASSIGNED', `New workout session assigned for ${formatIst(booking.startAt)}.`, booking._id.toString());
+  }
+  return { payment, package: null };
+}
+
+export async function verifyPayment(customerId: string, input: VerifyInput) {
+  const { orderId, paymentId, signature } = input;
+
+  const payment = await Payment.findOne({ razorpayOrderId: orderId });
+  if (!payment || payment.customerId !== customerId) {
+    throw new AppError(404, 'NOT_FOUND', 'Payment order not found');
+  }
+
+  // Retry of an already verified payment: return the same result, change nothing.
+  if (payment.status === 'PAID') {
+    if (payment.razorpayPaymentId !== paymentId) {
+      throw new AppError(409, 'ALREADY_PAID', 'This order is already paid');
+    }
+    return fulfilPayment(payment);
+  }
+  if (payment.status !== 'CREATED') {
+    throw new AppError(409, 'INVALID_STATUS', `This payment is ${payment.status.toLowerCase()}`);
+  }
+
+  const { keySecret } = getRazorpayCredentials();
+  if (!isValidRazorpaySignature(orderId, paymentId, signature, keySecret)) {
+    throw new AppError(400, 'INVALID_SIGNATURE', 'Payment signature verification failed');
+  }
+
+  // Only one request can move CREATED to PAID, even if two verify calls arrive together.
+  const claimed = await Payment.findOneAndUpdate(
+    { _id: payment._id, status: 'CREATED' },
+    { $set: { status: 'PAID', razorpayPaymentId: paymentId, signatureVerified: true } },
+    { returnDocument: 'after' },
+  );
+  if (!claimed) {
+    const latest = await Payment.findById(payment._id);
+    if (latest && latest.status === 'PAID' && latest.razorpayPaymentId === paymentId) {
+      return fulfilPayment(latest);
+    }
+    throw new AppError(409, 'INVALID_STATUS', 'This payment could not be verified');
+  }
+
+  try {
+    return await fulfilPayment(claimed);
+  } catch (err) {
+    // The order has a verified payment but its booking hold is no longer usable. Preserve the audit trail.
+    if (err instanceof AppError && err.code === 'HOLD_EXPIRED') {
+      await Payment.updateOne({ _id: claimed._id }, { $set: { status: 'FAILED' } });
+    }
+    throw err;
+  }
+}
+
+
+===== FILE: Backend\src\services\peak.ts =====
+import type { PeakWindow } from '../models/PricingConfig.js';
+
+const DAY_INDEX: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+
+const istParts = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'Asia/Kolkata',
+  weekday: 'short',
+  hour: 'numeric',
+  minute: 'numeric',
+  hourCycle: 'h23',
+});
+
+/** Weekday (0 = Sunday) and minutes since midnight of a moment, in India time. */
+export function getIstWeekdayAndMinutes(date: Date): { weekday: number; minutes: number } {
+  let weekdayStr = '';
+  let hour = 0;
+  let minute = 0;
+  for (const part of istParts.formatToParts(date)) {
+    if (part.type === 'weekday') weekdayStr = part.value;
+    if (part.type === 'hour') hour = parseInt(part.value, 10);
+    if (part.type === 'minute') minute = parseInt(part.value, 10);
+  }
+  return { weekday: DAY_INDEX[weekdayStr] ?? 0, minutes: hour * 60 + minute };
+}
+
+/** A slot is peak when its START time falls inside any peak window (start inclusive, end exclusive). */
+export function isPeakSlot(slotStart: Date, peakWindows: PeakWindow[]): boolean {
+  if (!peakWindows || peakWindows.length === 0) return false;
+  const { weekday, minutes } = getIstWeekdayAndMinutes(slotStart);
+  return peakWindows.some(
+    (w) => w.weekdays.includes(weekday) && minutes >= w.startMinute && minutes < w.endMinute,
+  );
+}
+
+===== FILE: Backend\src\services\pricing.service.ts =====
+import { PricingConfig } from '../models/PricingConfig.js';
+import type { PeakWindow } from '../models/PricingConfig.js';
+import { isPeakSlot } from './peak.js';
+
+// Weekdays 06:00-09:00 and 17:00-21:00, weekends 07:00-11:00 (India time). Minutes since midnight.
+export const DEFAULT_PEAK_WINDOWS: PeakWindow[] = [
+  { weekdays: [1, 2, 3, 4, 5], startMinute: 360, endMinute: 540 },
+  { weekdays: [1, 2, 3, 4, 5], startMinute: 1020, endMinute: 1260 },
+  { weekdays: [0, 6], startMinute: 420, endMinute: 660 },
+];
+
+export interface PricingRules {
+  normalPaise: number;
+  peakPaise: number;
+  commissionPercent: number;
+  peakWindows: PeakWindow[];
+  version: number;
+}
+
+export interface Quote {
+  tier: 'NORMAL' | 'PEAK';
+  sessionPaise: number;
+  commissionPaise: number;
+  totalPaise: number;
+  commissionPercent: number;
+  configVersion: number;
+}
+
+/** Pure function (no database). Money is integer paise; commission uses basis points to avoid float errors. */
+export function buildQuote(rules: PricingRules, slotStart: Date): Quote {
+  const peak = isPeakSlot(slotStart, rules.peakWindows);
+  const sessionPaise = peak ? rules.peakPaise : rules.normalPaise;
+  const basisPoints = Math.round(rules.commissionPercent * 100);
+  const commissionPaise = Math.round((sessionPaise * basisPoints) / 10000);
+  return {
+    tier: peak ? 'PEAK' : 'NORMAL',
+    sessionPaise,
+    commissionPaise,
+    totalPaise: sessionPaise + commissionPaise,
+    commissionPercent: rules.commissionPercent,
+    configVersion: rules.version,
+  };
+}
+
+export async function getPricingConfig() {
+  let config = await PricingConfig.findById('default');
+  if (!config) {
+    config = await PricingConfig.create({
+      _id: 'default',
+      normalPaise: 39900,
+      peakPaise: 49900,
+      commissionPercent: 10,
+      timezone: 'Asia/Kolkata',
+      peakWindows: DEFAULT_PEAK_WINDOWS,
+      version: 1,
+    });
+  }
+  return config;
+}
+
+export async function updatePricingConfig(data: {
+  normalPaise: number;
+  peakPaise: number;
+  commissionPercent: number;
+  peakWindows: PeakWindow[];
+}) {
+  const current = await getPricingConfig();
+  current.normalPaise = data.normalPaise;
+  current.peakPaise = data.peakPaise;
+  current.commissionPercent = data.commissionPercent;
+  current.peakWindows = data.peakWindows;
+  current.version += 1;
+  await current.save();
+  return current;
+}
+
+export async function calculateQuoteForDate(slotStart: Date): Promise<Quote> {
+  const config = await getPricingConfig();
+  return buildQuote(
+    {
+      normalPaise: config.normalPaise,
+      peakPaise: config.peakPaise,
+      commissionPercent: config.commissionPercent,
+      peakWindows: config.peakWindows.map((w) => ({
+        weekdays: [...w.weekdays],
+        startMinute: w.startMinute,
+        endMinute: w.endMinute,
+      })),
+      version: config.version,
+    },
+    slotStart,
+  );
+}
+
+
+===== FILE: Backend\src\services\session.service.ts =====
+import { Booking } from '../models/Booking.js';
+import type { AuthUser } from '../middleware/auth.js';
+import { sendNotification } from './notification.service.js';
+import { AppError } from '../utils/AppError.js';
+import { assertCanViewBooking } from '../utils/ownership.js';
+
+const SESSION_MS = 60 * 60 * 1000; // fixed 60 minutes
+const WARN_MS = 55 * 60 * 1000; // warning at 55 minutes
+
+async function explainFailure(bookingId: string, trainerId: string, action: string): Promise<AppError> {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) return new AppError(404, 'NOT_FOUND', 'Booking not found');
+  if (booking.trainerId !== trainerId) return new AppError(403, 'FORBIDDEN', 'Not assigned to this session');
+  return new AppError(
+    409,
+    'INVALID_STATUS',
+    `Cannot ${action} a session that is ${booking.status.toLowerCase().replace('_', ' ')}`,
+  );
+}
+
+/** Starts the session once. The database decides the start time, never the browser. */
+export async function startSession(bookingId: string, trainerId: string) {
+  const now = new Date();
+
+  const booking = await Booking.findOneAndUpdate(
+    { _id: bookingId, trainerId, status: { $in: ['CONFIRMED', 'ON_THE_WAY'] } },
+    {
+      $set: {
+        status: 'IN_PROGRESS',
+        'session.startedAt': now,
+        'session.warnAt': new Date(now.getTime() + WARN_MS),
+        'session.endsAt': new Date(now.getTime() + SESSION_MS),
+      },
+    },
+    { returnDocument: 'after' },
+  );
+
+  if (!booking) throw await explainFailure(bookingId, trainerId, 'start');
+
+  await sendNotification(
+    booking.customerId,
+    'SESSION_REMINDER',
+    'Your workout session has started! Check the live timer in your dashboard.',
+    booking._id.toString(),
+  );
+
+  return booking;
+}
+
+export async function markOnTheWay(bookingId: string, trainerId: string) {
+  const booking = await Booking.findOneAndUpdate(
+    { _id: bookingId, trainerId, status: 'CONFIRMED' },
+    { $set: { status: 'ON_THE_WAY' } }, { returnDocument: 'after' },
+  );
+  if (!booking) throw await explainFailure(bookingId, trainerId, 'mark on the way');
+  await sendNotification(booking.customerId, 'SESSION_REMINDER', 'Your trainer is on the way.', booking._id.toString());
+  return booking;
+}
+
+/** Same ticker output as before, but only people who belong to the booking can read it. */
+export async function getSessionTicker(bookingId: string, auth: AuthUser) {
+  const booking = await Booking.findById(bookingId);
+  if (!booking) throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+  assertCanViewBooking(booking, auth);
+
+  const serverTime = new Date();
+  const started = booking.session?.startedAt;
+  const endsAt = booking.session?.endsAt;
+
+  if (!started || !endsAt) {
+    return {
+      status: booking.status,
+      serverTime,
+      startedAt: null,
+      endsAt: null,
+      elapsedSeconds: 0,
+      remainingSeconds: 0,
+      is55MinWarning: false,
+      isCompleted: booking.status === 'COMPLETED',
+    };
+  }
+
+  const warnAt = booking.session?.warnAt ?? new Date(started.getTime() + WARN_MS);
+  const remainingMs = Math.max(0, endsAt.getTime() - serverTime.getTime());
+  const isTimeUp = serverTime.getTime() >= endsAt.getTime();
+  let status = booking.status;
+
+  // Lazy completion (a background job takes this over in Phase 15).
+  if (isTimeUp && booking.status === 'IN_PROGRESS') {
+    await Booking.updateOne(
+      { _id: booking._id, status: 'IN_PROGRESS' },
+      { $set: { status: 'COMPLETED', 'session.completeFiredAt': serverTime } },
+    );
+    status = 'COMPLETED';
+  }
+
+  return {
+    status,
+    serverTime,
+    startedAt: started,
+    endsAt,
+    elapsedSeconds: Math.floor((serverTime.getTime() - started.getTime()) / 1000),
+    remainingSeconds: Math.floor(remainingMs / 1000),
+    is55MinWarning: serverTime.getTime() >= warnAt.getTime() && !isTimeUp,
+    isCompleted: isTimeUp || status === 'COMPLETED',
+  };
+}
+
+export async function completeSession(bookingId: string, trainerId: string) {
+  const booking = await Booking.findOneAndUpdate(
+    { _id: bookingId, trainerId, status: 'IN_PROGRESS' },
+    { $set: { status: 'COMPLETED', 'session.completeFiredAt': new Date() } },
+    { returnDocument: 'after' },
+  );
+
+  if (!booking) throw await explainFailure(bookingId, trainerId, 'complete');
+
+  await sendNotification(
+    booking.customerId,
+    'SESSION_REMINDER',
+    'Workout session completed! Review your trainer notes and session log.',
+    booking._id.toString(),
+  );
+
+  return booking;
+}
+
+
+===== FILE: Backend\src\services\slots.service.ts =====
+import { Society } from '../models/Society.js';
+import { TrainerProfile } from '../models/TrainerProfile.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { User } from '../models/User.js';
+import { ceilToAtom, getSessionAtoms, parseTimeToMinutes } from './time.js';
+import { getIstWeekdayAndMinutes } from './peak.js';
+import { calculateHaversineDistance } from '../utils/geo.js';
+
+export interface TimeSlotOption {
+  startAt: Date;
+  endAt: Date;
+  availableTrainersCount: number;
+  hasPreferredTrainer: boolean;
+}
+
+export interface EligibleTrainerInfo {
+  trainerId: string;
+  name: string;
+  rating: number;
+  bio?: string;
+  distanceKm: number;
+}
+
+const IST_DAY_FORMAT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+export async function getAvailableSlotsForDay(societyId: string, dateStr: string, preferredTrainerId?: string) {
+  const society = await Society.findById(societyId);
+  if (!society) return [];
+
+  const dayKey = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+    ? dateStr
+    : IST_DAY_FORMAT.format(new Date(dateStr));
+  const dayStartMs = new Date(`${dayKey}T00:00:00+05:30`).getTime();
+
+  const now = new Date();
+  const minStart = new Date(now.getTime() + 10 * 60 * 1000); // Minimum 10 mins buffer from current time
+
+  const trainers = await TrainerProfile.find({ zoneIds: society.zoneId, isActive: true });
+  const slots: TimeSlotOption[] = [];
+
+  for (let hour = 6; hour <= 21; hour++) {
+    for (let min = 0; min < 60; min += 15) {
+      if (hour === 21 && min > 0) break;
+
+      const slotStart = new Date(dayStartMs + (hour * 60 + min) * 60_000);
+
+      // Do not return past time slots
+      if (slotStart < minStart) continue;
+
+      const slotEnd = new Date(slotStart.getTime() + 60 * 60 * 1000);
+
+      const atoms = getSessionAtoms(slotStart);
+      let availableCount = 0;
+      let preferredAvailable = false;
+
+      for (const t of trainers) {
+        const { weekday, minutes } = getIstWeekdayAndMinutes(slotStart);
+        const endMinutes = minutes + 60;
+
+        const covers = t.weeklyAvailability.some((w) => {
+          if (w.weekday !== weekday) return false;
+          const wStart = parseTimeToMinutes(w.start);
+          const wEnd = parseTimeToMinutes(w.end);
+          return minutes >= wStart && endMinutes <= wEnd;
+        });
+        if (!covers) continue;
+
+        const isOff = t.timeOff.some((to) => slotStart >= to.from && slotStart < to.to);
+        if (isOff) continue;
+
+        const locked = await SlotLock.exists({ trainerId: t.userId, atomStart: { $in: atoms } });
+        if (locked) continue;
+
+        availableCount++;
+        if (preferredTrainerId && t.userId === preferredTrainerId) {
+          preferredAvailable = true;
+        }
+      }
+
+      if (availableCount > 0) {
+        slots.push({
+          startAt: slotStart,
+          endAt: slotEnd,
+          availableTrainersCount: availableCount,
+          hasPreferredTrainer: preferredAvailable,
+        });
+      }
+    }
+  }
+
+  return slots;
+}
+
+export async function getEligibleTrainersForSlot(societyId: string, startAt: Date): Promise<EligibleTrainerInfo[]> {
+  const society = await Society.findById(societyId);
+  if (!society) return [];
+
+  const trainers = await TrainerProfile.find({ zoneIds: society.zoneId, isActive: true });
+  const atoms = getSessionAtoms(startAt);
+  const eligible: EligibleTrainerInfo[] = [];
+
+  for (const t of trainers) {
+    const { weekday, minutes } = getIstWeekdayAndMinutes(startAt);
+    const endMinutes = minutes + 60;
+
+    const covers = t.weeklyAvailability.some((w) => {
+      if (w.weekday !== weekday) return false;
+      const wStart = parseTimeToMinutes(w.start);
+      const wEnd = parseTimeToMinutes(w.end);
+      return minutes >= wStart && endMinutes <= wEnd;
+    });
+    if (!covers) continue;
+
+    const isOff = t.timeOff.some((to) => startAt >= to.from && startAt < to.to);
+    if (isOff) continue;
+
+    const locked = await SlotLock.exists({ trainerId: t.userId, atomStart: { $in: atoms } });
+    if (locked) continue;
+
+    const user = await User.findById(t.userId);
+    const distanceKm = calculateHaversineDistance(
+      society.location.lat,
+      society.location.lng,
+      t.baseLocation.lat,
+      t.baseLocation.lng,
+    );
+
+    eligible.push({
+      trainerId: t.userId,
+      name: user?.name ?? 'Trainer',
+      rating: t.rating,
+      bio: t.bio,
+      distanceKm,
+    });
+  }
+
+  return eligible;
+}
+
+export async function getInstantOptions(societyId: string) {
+  const now = new Date();
+  const minStart = new Date(now.getTime() + 10 * 60 * 1000);
+  const roundedStart = ceilToAtom(minStart);
+  const maxStart = new Date(now.getTime() + 60 * 60 * 1000);
+
+  const options: TimeSlotOption[] = [];
+  let curr = new Date(roundedStart);
+
+  while (curr <= maxStart) {
+    const trainers = await getEligibleTrainersForSlot(societyId, curr);
+    if (trainers.length > 0) {
+      options.push({
+        startAt: new Date(curr),
+        endAt: new Date(curr.getTime() + 60 * 60 * 1000),
+        availableTrainersCount: trainers.length,
+        hasPreferredTrainer: false,
+      });
+    }
+    curr = new Date(curr.getTime() + 15 * 60 * 1000);
+  }
+
+  return options;
+}
+
+===== FILE: Backend\src\services\ticker.service.ts =====
+import { Booking } from '../models/Booking.js';
+import { SlotLock } from '../models/SlotLock.js';
+import { sendNotification } from './notification.service.js';
+
+/** Reconciles expiring checkout holds and session lifecycle events. Safe to run repeatedly. */
+export async function runTicker(now = new Date()) {
+  const expired = await Booking.find({ status: 'PENDING_PAYMENT', holdExpiresAt: { $lte: now } }).select('_id');
+  if (expired.length) {
+    const ids = expired.map((b) => b._id);
+    await Booking.updateMany({ _id: { $in: ids }, status: 'PENDING_PAYMENT' }, { $set: { status: 'EXPIRED' }, $unset: { holdExpiresAt: 1 } });
+    await SlotLock.deleteMany({ bookingId: { $in: ids }, state: 'HELD' });
+  }
+
+  const completed = await Booking.find({ status: 'IN_PROGRESS', 'session.endsAt': { $lte: now }, 'session.completeFiredAt': { $exists: false } });
+  for (const booking of completed) {
+    const updated = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: 'IN_PROGRESS', 'session.completeFiredAt': { $exists: false } },
+      { $set: { status: 'COMPLETED', 'session.completeFiredAt': now } },
+      { returnDocument: 'after' },
+    );
+    if (updated) await sendNotification(updated.customerId, 'SESSION_REMINDER', 'Workout session completed! Review your trainer notes and session log.', updated._id.toString());
+  }
+
+  const warnings = await Booking.find({ status: 'IN_PROGRESS', 'session.warnAt': { $lte: now }, 'session.warnFiredAt': { $exists: false }, 'session.endsAt': { $gt: now } });
+  for (const booking of warnings) {
+    const updated = await Booking.findOneAndUpdate(
+      { _id: booking._id, status: 'IN_PROGRESS', 'session.warnFiredAt': { $exists: false } },
+      { $set: { 'session.warnFiredAt': now } }, { returnDocument: 'after' },
+    );
+    if (updated) {
+      await Promise.all([
+        sendNotification(updated.trainerId, 'SESSION_REMINDER', 'Five minutes remain in this workout session.', updated._id.toString()),
+        sendNotification(updated.customerId, 'SESSION_REMINDER', 'Your workout has five minutes remaining.', updated._id.toString()),
+      ]);
+    }
+  }
+  return { expired: expired.length, completed: completed.length, warnings: warnings.length };
+}
+
+
+===== FILE: Backend\src\services\time.ts =====
+/** Helper utilities for 15-minute time atoms and slot parsing */
+
+export const ATOM_MINUTES = 15;
+export const SESSION_MINUTES = 60;
+export const ATOMS_PER_SESSION = SESSION_MINUTES / ATOM_MINUTES; // 4 atoms
+
+/** Rounds a date up to the next 15-minute interval */
+export function ceilToAtom(date: Date): Date {
+  const ms = 1000 * 60 * ATOM_MINUTES;
+  return new Date(Math.ceil(date.getTime() / ms) * ms);
+}
+
+/** Generates array of 15-min start timestamps for a 60-min session */
+export function getSessionAtoms(startAt: Date): Date[] {
+  const atoms: Date[] = [];
+  const startTime = startAt.getTime();
+  for (let i = 0; i < ATOMS_PER_SESSION; i++) {
+    atoms.push(new Date(startTime + i * ATOM_MINUTES * 60 * 1000));
+  }
+  return atoms;
+}
+
+/** Parses "HH:mm" time string to minutes from midnight */
+export function parseTimeToMinutes(timeStr: string): number {
+  const [hours, minutes] = timeStr.split(':').map((v) => parseInt(v, 10));
+  return (hours ?? 0) * 60 + (minutes ?? 0);
+}
+
+===== FILE: Backend\src\tests\assignment.test.ts =====
+import { describe, expect, it } from 'vitest';
+import { rankCandidates } from '../services/assignment.service.js';
+import type { EvaluatedCandidate } from '../services/assignment.service.js';
+
+describe('Trainer Candidate Ranking Engine', () => {
+  const candidates: EvaluatedCandidate[] = [
+    { trainerId: 't1', trainerName: 'Far Trainer', distanceKm: 5.2, sessionsToday: 0, rating: 4.9, eligible: true },
+    { trainerId: 't2', trainerName: 'Close Trainer', distanceKm: 1.1, sessionsToday: 2, rating: 4.8, eligible: true },
+    { trainerId: 't3', trainerName: 'Busy Trainer', distanceKm: 1.1, sessionsToday: 5, rating: 5.0, eligible: true },
+    { trainerId: 't4', trainerName: 'Ineligible', distanceKm: 0.5, sessionsToday: 0, rating: 5.0, eligible: false, reason: 'Outside hours' },
+  ];
+
+  it('selects closest eligible trainer first', () => {
+    const res = rankCandidates(candidates);
+    expect(res.chosenId).toBe('t2');
+    expect(res.preferredHonored).toBe(false);
+  });
+
+  it('honors preferred trainer if eligible', () => {
+    const res = rankCandidates(candidates, 't1');
+    expect(res.chosenId).toBe('t1');
+    expect(res.preferredHonored).toBe(true);
+  });
+
+  it('falls back to ranking if preferred trainer is ineligible', () => {
+    const res = rankCandidates(candidates, 't4');
+    expect(res.chosenId).toBe('t2');
+    expect(res.preferredHonored).toBe(false);
+  });
+
+  it('returns no trainer if all candidates are ineligible', () => {
+    const ineligibles = candidates.map((c) => ({ ...c, eligible: false }));
+    const res = rankCandidates(ineligibles);
+    expect(res.chosenId).toBeUndefined();
+  });
+});
+
+===== FILE: Backend\src\tests\availability.test.ts =====
+import { describe, expect, it } from 'vitest';
+import { rankCandidates } from '../services/assignment.service.js';
+import type { EvaluatedCandidate } from '../services/assignment.service.js';
+
+describe('Candidate Ranking and Tie-Breaking Logic', () => {
+  it('ranks closer candidates first', () => {
+    const candidates: EvaluatedCandidate[] = [
+      { trainerId: 't2', trainerName: 'Far Trainer', distanceKm: 5.2, sessionsToday: 0, rating: 5.0, eligible: true },
+      { trainerId: 't1', trainerName: 'Near Trainer', distanceKm: 1.1, sessionsToday: 0, rating: 4.8, eligible: true },
+    ];
+
+    const result = rankCandidates(candidates);
+    expect(result.chosenTrainerId).toBe('t1');
+  });
+
+  it('ranks candidates with fewer sessions today if distance is equal', () => {
+    const candidates: EvaluatedCandidate[] = [
+      { trainerId: 't2', trainerName: 'Busy Trainer', distanceKm: 2.0, sessionsToday: 3, rating: 5.0, eligible: true },
+      { trainerId: 't1', trainerName: 'Free Trainer', distanceKm: 2.0, sessionsToday: 0, rating: 4.8, eligible: true },
+    ];
+
+    const result = rankCandidates(candidates);
+    expect(result.chosenTrainerId).toBe('t1');
+  });
+
+  it('honors preferred trainer when eligible', () => {
+    const candidates: EvaluatedCandidate[] = [
+      { trainerId: 't1', trainerName: 'Closer Trainer', distanceKm: 1.0, sessionsToday: 0, rating: 4.9, eligible: true },
+      { trainerId: 't2', trainerName: 'Preferred Trainer', distanceKm: 3.5, sessionsToday: 1, rating: 4.8, eligible: true },
+    ];
+
+    const result = rankCandidates(candidates, 't2');
+    expect(result.chosenTrainerId).toBe('t2');
+    expect(result.preferredHonored).toBe(true);
+  });
+
+  it('ignores preferred trainer if they are ineligible', () => {
+    const candidates: EvaluatedCandidate[] = [
+      { trainerId: 't1', trainerName: 'Closer Trainer', distanceKm: 1.0, sessionsToday: 0, rating: 4.9, eligible: true },
+      { trainerId: 't2', trainerName: 'Preferred Busy', distanceKm: 0.5, sessionsToday: 2, rating: 5.0, eligible: false, reason: 'Outside working hours' },
+    ];
+
+    const result = rankCandidates(candidates, 't2');
+    expect(result.chosenTrainerId).toBe('t1');
+    expect(result.preferredHonored).toBe(false);
+  });
+});
+
+===== FILE: Backend\src\tests\concurrency.test.ts =====
+import { describe, expect, it } from 'vitest';
+import { SlotLock } from '../models/SlotLock.js';
+
+describe('SlotLock Concurrency Guard', () => {
+  it('prevents overlapping atom locks for the same trainer', () => {
+    const trainerId = 'trainer-test-101';
+    const atomStart = new Date('2026-10-25T10:00:00.000Z');
+
+    const lock1 = new SlotLock({ trainerId, atomStart, state: 'CONFIRMED' });
+    const lock2 = new SlotLock({ trainerId, atomStart, state: 'CONFIRMED' });
+
+    expect(lock1.trainerId).toBe(lock2.trainerId);
+    expect(lock1.atomStart.getTime()).toBe(lock2.atomStart.getTime());
+  });
+});
+
+===== FILE: Backend\src\tests\http-security.test.ts =====
+import type { AddressInfo } from 'node:net';
+import type { Server } from 'node:http';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { createApp } from '../app.js';
+import { signToken } from '../utils/jwt.js';
+
+let server: Server;
+let base = '';
+
+const customerToken = () => signToken({ sub: '64b000000000000000000001', role: 'customer' });
+const OID = '64b000000000000000000002';
+
+beforeAll(async () => {
+  server = createApp().listen(0);
+  await new Promise<void>((resolve) => server.once('listening', () => resolve()));
+  base = `http://127.0.0.1:${(server.address() as AddressInfo).port}/api`;
+});
+
+afterAll(async () => {
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+});
+
+describe('routes that must not be reachable without proper access (no database needed)', () => {
+  it('the free-package endpoint no longer exists', async () => {
+    const res = await fetch(`${base}/packages/purchase`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+      body: JSON.stringify({ templateId: OID }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('booking, ticker, record and payment routes require login', async () => {
+    const urls: Array<[string, string]> = [
+      ['GET', `${base}/bookings/${OID}`],
+      ['GET', `${base}/bookings/${OID}/session/ticker`],
+      ['GET', `${base}/records/booking/${OID}`],
+      ['POST', `${base}/payments/verify`],
+      ['POST', `${base}/payments/order`],
+    ];
+    for (const [method, url] of urls) {
+      const res = await fetch(url, { method, headers: { 'Content-Type': 'application/json' }, body: method === 'POST' ? '{}' : undefined });
+      expect(res.status, `${method} ${url}`).toBe(401);
+    }
+  });
+
+  it('payment verify rejects a missing signature before touching the database', async () => {
+    const res = await fetch(`${base}/payments/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+      body: JSON.stringify({ orderId: 'order_x', paymentId: 'pay_x' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('payment order needs exactly one of bookingId or packageTemplateId', async () => {
+    const res = await fetch(`${base}/payments/order`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${customerToken()}` },
+      body: JSON.stringify({ bookingId: OID, packageTemplateId: OID }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('a malformed booking id is a clean 404, not a server error', async () => {
+    const res = await fetch(`${base}/bookings/not-an-id`, { headers: { Authorization: `Bearer ${customerToken()}` } });
+    expect(res.status).toBe(404);
+  });
+
+  it('customers cannot reach admin and trainer routes', async () => {
+    const admin = await fetch(`${base}/bookings/admin/all`, { headers: { Authorization: `Bearer ${customerToken()}` } });
+    const trainer = await fetch(`${base}/bookings/${OID}/session/start`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${customerToken()}` },
+    });
+    expect(admin.status).toBe(403);
+    expect(trainer.status).toBe(403);
+  });
+});
+
+===== FILE: Backend\src\tests\ownership.test.ts =====
+import { describe, expect, it } from 'vitest';
+import { assertCanViewBooking, canViewBooking } from '../utils/ownership.js';
+import { AppError } from '../utils/AppError.js';
+
+const booking = { customerId: 'cust-1', trainerId: 'train-1' };
+
+describe('booking ownership rules', () => {
+  it('lets the owning customer, the assigned trainer and an admin view it', () => {
+    expect(canViewBooking(booking, { id: 'cust-1', role: 'customer' })).toBe(true);
+    expect(canViewBooking(booking, { id: 'train-1', role: 'trainer' })).toBe(true);
+    expect(canViewBooking(booking, { id: 'anyone', role: 'admin' })).toBe(true);
+  });
+  it('blocks other customers and other trainers', () => {
+    expect(canViewBooking(booking, { id: 'cust-2', role: 'customer' })).toBe(false);
+    expect(canViewBooking(booking, { id: 'train-2', role: 'trainer' })).toBe(false);
+  });
+  it('does not mix up roles that share an id', () => {
+    expect(canViewBooking(booking, { id: 'train-1', role: 'customer' })).toBe(false);
+    expect(canViewBooking(booking, { id: 'cust-1', role: 'trainer' })).toBe(false);
+  });
+  it('throws a 404 (not 403) so booking existence is not revealed', () => {
+    try {
+      assertCanViewBooking(booking, { id: 'cust-2', role: 'customer' });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(AppError);
+      expect((err as AppError).status).toBe(404);
+    }
+  });
+});
+
+===== FILE: Backend\src\tests\payment.signature.test.ts =====
+import { describe, expect, it } from 'vitest';
+import { computeRazorpaySignature, isValidRazorpaySignature } from '../services/payment.service.js';
+
+const SECRET = 'unit_test_secret';
+
+describe('Razorpay signature verification', () => {
+  const orderId = 'order_ABC123';
+  const paymentId = 'pay_XYZ789';
+  const good = computeRazorpaySignature(orderId, paymentId, SECRET);
+
+  it('accepts the correct signature', () => {
+    expect(isValidRazorpaySignature(orderId, paymentId, good, SECRET)).toBe(true);
+  });
+  it('rejects the old test bypass string', () => {
+    expect(isValidRazorpaySignature(orderId, paymentId, 'simulated_test_signature', SECRET)).toBe(false);
+  });
+  it('rejects empty and wrong-length signatures', () => {
+    expect(isValidRazorpaySignature(orderId, paymentId, '', SECRET)).toBe(false);
+    expect(isValidRazorpaySignature(orderId, paymentId, good.slice(0, -1), SECRET)).toBe(false);
+  });
+  it('rejects a signature made with another secret', () => {
+    const forged = computeRazorpaySignature(orderId, paymentId, 'attacker_secret');
+    expect(isValidRazorpaySignature(orderId, paymentId, forged, SECRET)).toBe(false);
+  });
+  it('rejects a valid signature used with a different payment id or order id', () => {
+    expect(isValidRazorpaySignature(orderId, 'pay_OTHER', good, SECRET)).toBe(false);
+    expect(isValidRazorpaySignature('order_OTHER', paymentId, good, SECRET)).toBe(false);
+  });
+});
+
+===== FILE: Backend\src\tests\pricing.test.ts =====
+import { describe, expect, it } from 'vitest';
+import { isPeakSlot } from '../services/peak.js';
+import { DEFAULT_PEAK_WINDOWS, buildQuote } from '../services/pricing.service.js';
+import type { PricingRules } from '../services/pricing.service.js';
+
+const rules: PricingRules = {
+  normalPaise: 39900,
+  peakPaise: 49900,
+  commissionPercent: 10,
+  peakWindows: DEFAULT_PEAK_WINDOWS,
+  version: 1,
+};
+
+// 2026-10-19 is a Monday, 24 is Saturday, 25 is Sunday. All times below are India time (+05:30).
+describe('peak detection (default windows)', () => {
+  it('Monday 07:00 is peak', () => {
+    expect(isPeakSlot(new Date('2026-10-19T07:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+  });
+  it('Monday 06:00 is peak (start is inclusive)', () => {
+    expect(isPeakSlot(new Date('2026-10-19T06:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+  });
+  it('Monday 09:00 is normal (end is exclusive)', () => {
+    expect(isPeakSlot(new Date('2026-10-19T09:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(false);
+  });
+  it('Monday 14:00 is normal', () => {
+    expect(isPeakSlot(new Date('2026-10-19T14:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(false);
+  });
+  it('Monday 17:00 and 20:45 are peak, 21:00 is normal', () => {
+    expect(isPeakSlot(new Date('2026-10-19T17:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+    expect(isPeakSlot(new Date('2026-10-19T20:45:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+    expect(isPeakSlot(new Date('2026-10-19T21:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(false);
+  });
+  it('Saturday 08:00 and Sunday 08:00 are peak, Saturday 12:00 is normal', () => {
+    expect(isPeakSlot(new Date('2026-10-24T08:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+    expect(isPeakSlot(new Date('2026-10-25T08:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+    expect(isPeakSlot(new Date('2026-10-24T12:00:00+05:30'), DEFAULT_PEAK_WINDOWS)).toBe(false);
+  });
+  it('uses India time, not UTC (01:30 UTC is 07:00 IST)', () => {
+    expect(isPeakSlot(new Date('2026-10-19T01:30:00.000Z'), DEFAULT_PEAK_WINDOWS)).toBe(true);
+  });
+});
+
+describe('price calculation (integer paise)', () => {
+  it('normal slot: â‚¹399 + â‚¹39.90 = â‚¹438.90', () => {
+    const q = buildQuote(rules, new Date('2026-10-19T14:00:00+05:30'));
+    expect(q.tier).toBe('NORMAL');
+    expect(q.sessionPaise).toBe(39900);
+    expect(q.commissionPaise).toBe(3990);
+    expect(q.totalPaise).toBe(43890);
+  });
+  it('peak slot: â‚¹499 + â‚¹49.90 = â‚¹548.90', () => {
+    const q = buildQuote(rules, new Date('2026-10-19T07:00:00+05:30'));
+    expect(q.tier).toBe('PEAK');
+    expect(q.sessionPaise).toBe(49900);
+    expect(q.commissionPaise).toBe(4990);
+    expect(q.totalPaise).toBe(54890);
+  });
+  it('is configurable: 12.5% commission rounds to the nearest paise', () => {
+    const q = buildQuote({ ...rules, commissionPercent: 12.5 }, new Date('2026-10-19T14:00:00+05:30'));
+    expect(q.commissionPaise).toBe(4988);
+    expect(q.totalPaise).toBe(44888);
+  });
+  it('0% commission adds nothing and the version is carried into the quote', () => {
+    const q = buildQuote({ ...rules, commissionPercent: 0, version: 7 }, new Date('2026-10-19T14:00:00+05:30'));
+    expect(q.commissionPaise).toBe(0);
+    expect(q.configVersion).toBe(7);
+  });
+});
+
+===== FILE: Backend\src\utils\AppError.ts =====
+export interface ErrorDetail {
+  path: string;
+  message: string;
+}
+
+/** Errors we throw on purpose. The error handler turns them into clean JSON responses. */
+export class AppError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly details?: ErrorDetail[];
+
+  constructor(status: number, code: string, message: string, details?: ErrorDetail[]) {
+    super(message);
+    this.name = 'AppError';
+    this.status = status;
+    this.code = code;
+    this.details = details;
+  }
+}
+
+===== FILE: Backend\src\utils\geo.ts =====
+/** Calculates distance in kilometers between two lat/lng points using the Haversine formula */
+export function calculateHaversineDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371;
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  const distance = R * c;
+  return Math.round(distance * 10) / 10;
+}
+
+===== FILE: Backend\src\utils\ids.ts =====
+import { AppError } from './AppError.js';
+
+const OBJECT_ID_PATTERN = /^[a-f\d]{24}$/i;
+
+/** Returns the value if it is a valid Mongo ObjectId string, otherwise throws a clean 404. */
+export function requireObjectId(value: unknown, label = 'Record'): string {
+  if (typeof value !== 'string' || !OBJECT_ID_PATTERN.test(value)) {
+    throw new AppError(404, 'NOT_FOUND', `${label} not found`);
+  }
+  return value;
+}
+
+===== FILE: Backend\src\utils\jwt.ts =====
+import jwt from 'jsonwebtoken';
+import { env } from '../config/env.js';
+import type { Role } from '../models/User.ts';
+
+export interface TokenPayload {
+  sub: string; // user id
+  role: Role;
+}
+
+export function signToken(payload: TokenPayload): string {
+  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: env.JWT_EXPIRES_IN_SECONDS });
+}
+
+/** Returns the payload, or null if the token is invalid or expired. */
+export function verifyToken(token: string): TokenPayload | null {
+  try {
+    const decoded = jwt.verify(token, env.JWT_SECRET);
+    if (typeof decoded === 'string') return null;
+    const { sub, role } = decoded;
+    if (typeof sub !== 'string' || typeof role !== 'string') return null;
+    return { sub, role: role as Role };
+  } catch {
+    return null;
+  }
+}
+
+===== FILE: Backend\src\utils\ownership.ts =====
+import type { AuthUser } from '../middleware/auth.js';
+import { AppError } from './AppError.js';
+
+export interface OwnedBooking {
+  customerId: string;
+  trainerId: string;
+}
+
+/** Customer: own bookings. Trainer: assigned bookings. Admin: all bookings. */
+export function canViewBooking(booking: OwnedBooking, auth: AuthUser): boolean {
+  if (auth.role === 'admin') return true;
+  if (auth.role === 'customer') return booking.customerId === auth.id;
+  if (auth.role === 'trainer') return booking.trainerId === auth.id;
+  return false;
+}
+
+/** Throws 404 (not 403) so we do not reveal that another user's booking exists. */
+export function assertCanViewBooking(booking: OwnedBooking, auth: AuthUser): void {
+  if (!canViewBooking(booking, auth)) {
+    throw new AppError(404, 'NOT_FOUND', 'Booking not found');
+  }
+}
+
+===== FILE: Backend\src\utils\timeFormat.ts =====
+const istFormatter = new Intl.DateTimeFormat('en-IN', {
+  timeZone: 'Asia/Kolkata',
+  day: 'numeric',
+  month: 'short',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+  hour12: true,
+});
+
+/** Always formats in India time, whatever timezone the server runs in. Example: "20 Oct 2026, 7:30 pm IST" */
+export function formatIst(date: Date): string {
+  return `${istFormatter.format(date)} IST`;
+}
+
+===== FILE: Backend\src\app.ts =====
+import express from 'express';
+import cors from 'cors';
+import helmet from 'helmet';
+import { env } from './config/env.js';
+import routes from './routes/index.js';
+import { errorHandler, notFoundHandler } from './middleware/error.js';
+
+const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
+export function createApp() {
+  const app = express();
+
+  // Render sits behind a proxy; needed so rate limiting sees the real client IP.
+  app.set('trust proxy', 1);
+
+  app.use(helmet());
+  app.use(
+    cors({
+      // In development accept any localhost / 127.0.0.1 port (Vite may pick 5174, 5175...).
+      origin: (origin, cb) => {
+        if (!origin) return cb(null, true);
+        if (env.clientOrigins.includes(origin)) return cb(null, true);
+        if (!env.isProduction && LOCAL_ORIGIN.test(origin)) return cb(null, true);
+        return cb(null, false);
+      },
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
+    }),
+  );
+  app.use(express.json({ limit: '100kb' }));
+
+  app.use('/api', routes);
+
+  app.use(notFoundHandler);
+  app.use(errorHandler);
+
+  return app;
+}
+
+===== FILE: Backend\src\index.ts =====
+import './config/network.js'; // MUST stay the first import
+import { createApp } from './app.js';
+import { connectDb } from './config/db.js';
+import { env } from './config/env.js';
+import { runTicker } from './services/ticker.service.js';
+
+// Never let a stray provider/network error kill the API (this caused "Cannot reach the server").
+process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err);
+});
+
+async function main() {
+  await connectDb();
+  const app = createApp();
+  // Runs on boot and thereafter; each DB update is conditional so overlapping instances remain safe.
+  await runTicker();
+  setInterval(() => void runTicker().catch((err) => console.error('Ticker failed:', err)), 30_000).unref();
+  app.listen(env.PORT, () => {
+    console.log(`API listening on port ${env.PORT} (${env.NODE_ENV})`);
+  });
+}
+
+main().catch((err) => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
+
+===== FILE: Backend\package.json =====
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "dist/index.js",
+  "scripts": {
+    "test": "vitest run",
+    "dev": "tsx watch --env-file=.env src/index.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "seed": "tsx --env-file=.env src/seed/seed.ts",
+    "typecheck": "tsc --noEmit",
+    "migrate-pricing": "tsx --env-file=.env src/seed/migrate-pricing.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "express-rate-limit": "^8.7.1",
+    "helmet": "^8.3.0",
+    "jsonwebtoken": "^9.0.3",
+    "mongoose": "^9.11.2",
+    "razorpay": "^2.9.8",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^24.19.2",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.2",
+    "vitest": "^5.0.5"
+  },
+  "private": "true"
+}
+
+
+===== FILE: Backend\.env.example =====
+NODE_ENV=development
+PORT=5000
+MONGODB_URI=mongodb+srv://<user>:<password>@<cluster>.mongodb.net/zuryo?retryWrites=true&w=majority
+JWT_SECRET=replace-with-a-random-string-of-at-least-32-characters
+JWT_EXPIRES_IN_SECONDS=43200
+CLIENT_ORIGIN=http://localhost:5173
+SEED_PASSWORD=Demo@12345
+
+# Razorpay TEST keys only
+RAZORPAY_KEY_ID=rzp_test_xxxxxxxx
+RAZORPAY_KEY_SECRET=xxxxxxxx
+
+# AI (Phase 16): Gemini now, NVIDIA added as first choice
+
+LLM_API_KEY=your-gemini-api-key-here
+LLM_MODEL=gemini-3.8-flash
+
+
+NVIDIA_API_KEY=your-nvidia-api-key-here
+NVIDIA_MODEL=z-ai/glm-5.3-flash
+NVIDIA_BASE_URL=https://integrate.api.nvidia.com/v1
+
+===== FILE: Backend\vitest.config.ts =====
+import { defineConfig } from 'vitest/config';
+
+export default defineConfig({
+  test: {
+    include: ['src/**/*.test.ts'],
+    exclude: ['dist/**', 'node_modules/**'],
+    env: {
+      NODE_ENV: 'test',
+      MONGODB_URI: 'mongodb://127.0.0.1:27017/zuryo_unit_tests',
+      JWT_SECRET: 'unit-test-secret-unit-test-secret-1234',
+      CLIENT_ORIGIN: 'http://localhost:5173',
+      RAZORPAY_KEY_ID: 'rzp_test_unit',
+      RAZORPAY_KEY_SECRET: 'unit_test_secret',
+    },
+  },
+});
+
+===== FILE: Backend\tsconfig.json =====
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    "rootDir": "src",
+    "outDir": "dist",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true
+  },
+  "include": ["src"]
+}

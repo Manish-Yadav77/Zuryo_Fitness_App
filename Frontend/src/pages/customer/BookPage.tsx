@@ -38,7 +38,7 @@ export default function BookPage() {
 
   const [societies, setSocieties] = useState<Society[]>([]);
   const [societyId, setSocietyId] = useState('');
-  const [mode, setMode] = useState<BookingMode>('INSTANT');
+  const [mode, setMode] = useState<BookingMode>('SCHEDULED');
   const [selectedDate, setSelectedDate] = useState<string>(() => todayIst());
 
   const [availableSlots, setAvailableSlots] = useState<TimeSlotOption[]>([]);
@@ -88,6 +88,7 @@ export default function BookPage() {
 
   useEffect(() => {
     if (!societyId) return;
+    let isMounted = true;
 
     async function fetchSlots() {
       setSlotsLoading(true);
@@ -95,12 +96,14 @@ export default function BookPage() {
       try {
         if (mode === 'INSTANT') {
           const options = await availabilityApi.getInstantOptions(societyId);
+          if (!isMounted) return;
           setAvailableSlots(options || []);
           if (options && options.length > 0) {
             handleSelectSlot(options[0]?.startAt ?? null);
           } else {
             setSelectedSlot(null);
             setQuote(null);
+            setEligibleTrainers([]);
           }
         } else {
           const slots = await availabilityApi.getDaySlots(
@@ -108,22 +111,28 @@ export default function BookPage() {
             selectedDate,
             preferredTrainerId
           );
+          if (!isMounted) return;
           setAvailableSlots(slots || []);
           if (slots && slots.length > 0) {
             handleSelectSlot(slots[0]?.startAt ?? null);
           } else {
             setSelectedSlot(null);
             setQuote(null);
+            setEligibleTrainers([]);
           }
         }
       } catch (err) {
-        setError(parseApiError(err).message);
+        if (isMounted) setError(parseApiError(err).message);
       } finally {
-        setSlotsLoading(false);
+        if (isMounted) setSlotsLoading(false);
       }
     }
 
     fetchSlots();
+
+    return () => {
+      isMounted = false;
+    };
   }, [societyId, mode, selectedDate, preferredTrainerId]);
 
   async function handleSelectSlot(slotIso: string | null) {
@@ -398,7 +407,7 @@ export default function BookPage() {
                     )}
                   </div>
                   <span className="mt-0.5 block text-xs text-slate-500">
-                    Uses one credit from your earliest-expiring package. ₹0 payable today.
+                    Uses one credit from your earliest-expiring package.
                   </span>
                 </div>
               </label>
@@ -415,7 +424,7 @@ export default function BookPage() {
             className="py-3 text-sm font-bold"
           >
             {paymentMode === 'PACKAGE'
-              ? 'Book with Package Credit (₹0)'
+              ? 'Book with Package Credit'
               : `Continue to Payment (${
                   quote ? formatPaise(quote.totalPaise) : 'Select Slot'
                 })`}

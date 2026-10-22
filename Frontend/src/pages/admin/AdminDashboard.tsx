@@ -2,21 +2,27 @@ import { useEffect, useState } from 'react';
 import {
   TrendingUp,
   Calendar,
-  UserCheck,
+  PieChart,
+  Wallet,
+  Percent,
+  Ban,
+  Receipt,
   Check,
   X,
 } from 'lucide-react';
 import { bookingsApi } from '@/api/bookings.api';
-import type { AssignmentDecisionDoc } from '@/api/bookings.api';
+import type { AssignmentDecisionDoc, AdminPaymentDoc } from '@/api/bookings.api';
 import type { Booking } from '@/types/booking';
 import { formatPaise } from '@/lib/money';
 import { Badge } from '@/components/ui/Badge';
 import { Card } from '@/components/ui/Card';
 
 const ITEMS_PER_PAGE = 5;
+const VALID_STATUSES = ['CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS', 'COMPLETED'];
 
 export default function AdminDashboard() {
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [payments, setPayments] = useState<AdminPaymentDoc[]>([]);
   const [decisions, setDecisions] = useState<AssignmentDecisionDoc[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -26,11 +32,12 @@ export default function AdminDashboard() {
   useEffect(() => {
     async function loadAdminData() {
       try {
-        const [bList, dList] = await Promise.all([
+        const [adminData, dList] = await Promise.all([
           bookingsApi.getAllAdmin(),
           bookingsApi.getAssignmentsAdmin(),
         ]);
-        setBookings(bList || []);
+        setBookings(adminData.bookings || []);
+        setPayments(adminData.payments || []);
         setDecisions(dList || []);
       } catch (err) {
         console.error(err);
@@ -43,16 +50,63 @@ export default function AdminDashboard() {
 
   if (loading) {
     return (
-      <div className="flex min-h-[300px] items-center justify-center py-12 text-sm text-slate-500">
+      <div className="flex min-h-75 items-center justify-center py-12 text-sm text-slate-500">
         Loading admin operations console...
       </div>
     );
   }
 
-  const totalRevenue = bookings.reduce(
+  const validBookings = bookings.filter((b) => VALID_STATUSES.includes(b.status));
+  const cancelledBookings = bookings.filter(
+    (b) => b.status === 'CANCELLED' || b.status === 'EXPIRED'
+  );
+
+  const realizedGrossVolume = validBookings.reduce(
     (acc, b) => acc + (b.priceSnapshot?.totalPaise || 0),
     0
   );
+
+  const directPaidVolume = validBookings
+    .filter((b) => b.paymentMode === 'PAYMENT')
+    .reduce((acc, b) => acc + (b.priceSnapshot?.totalPaise || 0), 0);
+
+  const packageCreditVolume = validBookings
+    .filter((b) => b.paymentMode === 'PACKAGE')
+    .reduce((acc, b) => acc + (b.priceSnapshot?.totalPaise || 0), 0);
+
+  const totalSocietyCommission = validBookings.reduce(
+    (acc, b) => acc + (b.priceSnapshot?.commissionPaise || 0),
+    0
+  );
+
+  const totalTrainerBaseVolume = validBookings.reduce(
+    (acc, b) => acc + (b.priceSnapshot?.sessionPaise || 0),
+    0
+  );
+
+  const cancelledVolume = cancelledBookings.reduce(
+    (acc, b) => acc + (b.priceSnapshot?.totalPaise || 0),
+    0
+  );
+
+  const packageSalesRevenue = payments
+    .filter((p) => p.purpose === 'PACKAGE')
+    .reduce((acc, p) => acc + p.amountPaise, 0);
+
+  const avgCommissionPercent =
+    validBookings.length > 0
+      ? Number(
+          (
+            validBookings.reduce(
+              (acc, b) => acc + (b.priceSnapshot?.commissionPercent ?? 10),
+              0
+            ) / validBookings.length
+          ).toFixed(1)
+        )
+      : 10;
+
+  const commissionPercentShare = avgCommissionPercent;
+  const trainerPercentShare = 100 - commissionPercentShare;
 
   const totalBookingPages = Math.ceil(bookings.length / ITEMS_PER_PAGE) || 1;
   const paginatedBookings = bookings.slice(
@@ -77,12 +131,12 @@ export default function AdminDashboard() {
           Admin Console
         </h1>
         <p className="text-sm text-slate-500">
-          System oversight, live bookings, and auto-assignment decisions.
+          System oversight, live bookings, commission breakdowns, and auto-assignment decisions.
         </p>
       </div>
 
-      {/* Metrics Row */}
-      <div className="mb-8 grid gap-4 sm:grid-cols-3">
+      {/* Primary Metrics Row */}
+      <div className="mb-6 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card className="p-5 shadow-xs transition-all hover:border-slate-300">
           <div className="flex items-center gap-3">
             <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
@@ -95,6 +149,9 @@ export default function AdminDashboard() {
               <p className="text-2xl font-extrabold text-slate-900">
                 {bookings.length}
               </p>
+              <p className="text-[11px] text-slate-500">
+                {validBookings.length} Active / {cancelledBookings.length} Cancelled
+              </p>
             </div>
           </div>
         </Card>
@@ -106,10 +163,13 @@ export default function AdminDashboard() {
             </div>
             <div>
               <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                Total Gross Volume
+                Realized Gross Volume
               </span>
               <p className="text-2xl font-extrabold text-emerald-600">
-                {formatPaise(totalRevenue)}
+                {formatPaise(realizedGrossVolume)}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                Active & completed sessions
               </p>
             </div>
           </div>
@@ -117,20 +177,121 @@ export default function AdminDashboard() {
 
         <Card className="p-5 shadow-xs transition-all hover:border-slate-300">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-600">
-              <UserCheck className="h-5 w-5" />
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+              <Percent className="h-5 w-5" />
             </div>
             <div>
               <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-500">
-                Assignment Decisions
+                Society Commission
               </span>
-              <p className="text-2xl font-extrabold text-slate-900">
-                {decisions.length}
+              <p className="text-2xl font-extrabold text-indigo-600">
+                {formatPaise(totalSocietyCommission)}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                {commissionPercentShare}% avg platform share
+              </p>
+            </div>
+          </div>
+        </Card>
+
+        <Card className="p-5 shadow-xs transition-all hover:border-slate-300">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-amber-50 text-amber-600">
+              <Wallet className="h-5 w-5" />
+            </div>
+            <div>
+              <span className="block text-[11px] font-bold uppercase tracking-wider text-slate-500">
+                Package Sales Cash
+              </span>
+              <p className="text-2xl font-extrabold text-amber-600">
+                {formatPaise(packageSalesRevenue)}
+              </p>
+              <p className="text-[11px] text-slate-500">
+                Upfront package purchases
               </p>
             </div>
           </div>
         </Card>
       </div>
+
+      {/* Commission & Revenue Breakdown Card */}
+      <Card className="mb-8 p-5 shadow-sm space-y-5">
+        <div className="flex items-center gap-2 border-b border-slate-100 pb-3">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
+            <PieChart className="h-4 w-4" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-slate-900">
+              Commission & Revenue Distribution
+            </h2>
+            <p className="text-xs text-slate-500">
+              Breakdown of session gross value, society commission cut, direct payments, and package credits.
+            </p>
+          </div>
+        </div>
+
+        {/* Visual Progress Bar */}
+        <div>
+          <div className="mb-1.5 flex justify-between text-xs font-bold text-slate-700">
+            <span>Trainer Base Share ({trainerPercentShare}%): {formatPaise(totalTrainerBaseVolume)}</span>
+            <span>Society Commission ({commissionPercentShare}%): {formatPaise(totalSocietyCommission)}</span>
+          </div>
+          <div className="flex h-3 w-full overflow-hidden rounded-full bg-slate-100">
+            <div
+              className="bg-emerald-500 transition-all duration-300"
+              style={{ width: `${trainerPercentShare}%` }}
+              title={`Trainer Share: ${formatPaise(totalTrainerBaseVolume)}`}
+            />
+            <div
+              className="bg-indigo-600 transition-all duration-300"
+              style={{ width: `${commissionPercentShare}%` }}
+              title={`Society Commission: ${formatPaise(totalSocietyCommission)}`}
+            />
+          </div>
+        </div>
+
+        {/* Grid Breakdown Details */}
+        <div className="grid gap-3 sm:grid-cols-3 text-xs">
+          <div className="rounded-xl border border-emerald-200/80 bg-emerald-50/40 p-3.5 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-emerald-900">
+              <Receipt className="h-4 w-4 text-emerald-600" />
+              <span>Direct Payment Volume</span>
+            </div>
+            <p className="text-lg font-extrabold text-emerald-700">
+              {formatPaise(directPaidVolume)}
+            </p>
+            <p className="text-[11px] text-slate-500">
+              {validBookings.filter((b) => b.paymentMode === 'PAYMENT').length} sessions paid directly via Razorpay
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-teal-200/80 bg-teal-50/40 p-3.5 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-teal-900">
+              <Wallet className="h-4 w-4 text-teal-600" />
+              <span>Package Credit Redemptions</span>
+            </div>
+            <p className="text-lg font-extrabold text-teal-700">
+              {formatPaise(packageCreditVolume)}
+            </p>
+            <p className="text-[11px] text-slate-500">
+              {validBookings.filter((b) => b.paymentMode === 'PACKAGE').length} sessions booked with package credits (₹0 charged at checkout)
+            </p>
+          </div>
+
+          <div className="rounded-xl border border-rose-200/80 bg-rose-50/40 p-3.5 space-y-1">
+            <div className="flex items-center gap-1.5 font-bold text-rose-900">
+              <Ban className="h-4 w-4 text-rose-600" />
+              <span>Cancelled / Released Volume</span>
+            </div>
+            <p className="text-lg font-extrabold text-rose-700">
+              {formatPaise(cancelledVolume)}
+            </p>
+            <p className="text-[11px] text-slate-500">
+              {cancelledBookings.length} bookings cancelled (refunded or package credits restored)
+            </p>
+          </div>
+        </div>
+      </Card>
 
       {/* All Bookings Table Card */}
       <Card className="mb-8 p-5 shadow-sm">
@@ -160,51 +321,97 @@ export default function AdminDashboard() {
                     <th className="px-4 py-3">ID</th>
                     <th className="px-4 py-3">Residence</th>
                     <th className="px-4 py-3">Slot Start</th>
-                    <th className="px-4 py-3">Trainer ID</th>
+                    <th className="px-4 py-3">Payment Method</th>
                     <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3 text-right">Total</th>
+                    <th className="px-4 py-3">Society Cut</th>
+                    <th className="px-4 py-3 text-right">Cash / Credit Value</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 bg-white">
-                  {paginatedBookings.map((b) => (
-                    <tr key={b._id} className="transition-colors hover:bg-slate-50/70">
-                      <td className="px-4 py-3 font-mono text-xs text-slate-500">
-                        {b._id.slice(-6)}
-                      </td>
-                      <td className="px-4 py-3 font-bold text-slate-900">
-                        {b.societyId ? b.societyId.name : 'Residence'}
-                      </td>
-                      <td className="px-4 py-3 whitespace-nowrap text-slate-600">
-                        {new Date(b.startAt).toLocaleString(undefined, {
-                          dateStyle: 'medium',
-                          timeStyle: 'short',
-                        })}
-                      </td>
-                      <td className="px-4 py-3 font-mono text-xs text-slate-600">
-                        {b.trainerId ? b.trainerId.slice(-6) : '-'}
-                      </td>
-                      <td className="px-4 py-3">
-                        <Badge
-                          tone={
-                            b.status === 'CONFIRMED' || b.status === 'COMPLETED'
-                              ? 'emerald'
-                              : b.status === 'CANCELLED' || b.status === 'EXPIRED'
-                              ? 'rose'
-                              : b.status === 'IN_PROGRESS' ||
-                                b.status === 'ON_THE_WAY' ||
-                                b.status === 'PENDING_PAYMENT'
-                              ? 'amber'
-                              : 'slate'
-                          }
-                        >
-                          {b.status}
-                        </Badge>
-                      </td>
-                      <td className="px-4 py-3 text-right font-extrabold text-slate-900">
-                        {formatPaise(b.priceSnapshot?.totalPaise || 0)}
-                      </td>
-                    </tr>
-                  ))}
+                  {paginatedBookings.map((b) => {
+                    const isCancelled = b.status === 'CANCELLED' || b.status === 'EXPIRED';
+                    const isPackage = b.paymentMode === 'PACKAGE';
+                    const commissionAmount = b.priceSnapshot?.commissionPaise || 0;
+                    const commissionPct = b.priceSnapshot?.commissionPercent ?? 10;
+                    const totalVal = b.priceSnapshot?.totalPaise || 0;
+
+                    return (
+                      <tr key={b._id} className="transition-colors hover:bg-slate-50/70">
+                        <td className="px-4 py-3 font-mono text-xs text-slate-500">
+                          {b._id.slice(-6)}
+                        </td>
+                        <td className="px-4 py-3 font-bold text-slate-900">
+                          {b.societyId ? b.societyId.name : 'Residence'}
+                        </td>
+                        <td className="px-4 py-3 whitespace-nowrap text-slate-600">
+                          {new Date(b.startAt).toLocaleString(undefined, {
+                            dateStyle: 'medium',
+                            timeStyle: 'short',
+                          })}
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge tone={isPackage ? 'sky' : 'emerald'}>
+                            {isPackage ? 'Package Credit' : 'Direct Payment'}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3">
+                          <Badge
+                            tone={
+                              b.status === 'CONFIRMED' || b.status === 'COMPLETED'
+                                ? 'emerald'
+                                : isCancelled
+                                ? 'rose'
+                                : b.status === 'IN_PROGRESS' ||
+                                  b.status === 'ON_THE_WAY' ||
+                                  b.status === 'PENDING_PAYMENT'
+                                ? 'amber'
+                                : 'slate'
+                            }
+                          >
+                            {b.status}
+                          </Badge>
+                        </td>
+                        <td className="px-4 py-3 font-medium text-indigo-700">
+                          {isCancelled ? (
+                            <span className="text-slate-400 line-through">
+                              {formatPaise(commissionAmount)}
+                            </span>
+                          ) : (
+                            <span>
+                              {formatPaise(commissionAmount)}{' '}
+                              <span className="text-[10px] text-slate-400">({commissionPct}%)</span>
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right">
+                          {isCancelled ? (
+                            <div className="space-y-0.5">
+                              <span className="block font-bold text-rose-600">₹0.00</span>
+                              <span className="block text-[10px] text-slate-400 line-through">
+                                Val: {formatPaise(totalVal)}
+                              </span>
+                            </div>
+                          ) : isPackage ? (
+                            <div className="space-y-0.5">
+                              <span className="block font-bold text-teal-700">₹0.00</span>
+                              <span className="block text-[10px] font-semibold text-slate-500">
+                                (1 Credit Used · Val: {formatPaise(totalVal)})
+                              </span>
+                            </div>
+                          ) : (
+                            <div className="space-y-0.5">
+                              <span className="block font-extrabold text-slate-900">
+                                {formatPaise(totalVal)}
+                              </span>
+                              <span className="block text-[10px] text-emerald-600 font-semibold">
+                                Paid Cash
+                              </span>
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -356,7 +563,7 @@ export default function AdminDashboard() {
                               {/* Stat Pills */}
                               <div className="mt-3 grid grid-cols-2 gap-1.5 text-[11px]">
                                 <div className="flex items-center gap-1 rounded-md bg-slate-100/70 px-2 py-1 text-slate-600">
-                                  <span className="text-slate-400">📍</span>
+                                  <span className="text-slate-400">📍 </span>
                                   <span className="font-semibold">{c.distanceKm} km</span>
                                 </div>
                                 <div className="flex items-center gap-1 rounded-md bg-slate-100/70 px-2 py-1 text-slate-600">
