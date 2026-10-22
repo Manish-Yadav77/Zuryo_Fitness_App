@@ -67,10 +67,9 @@ export async function findBestTrainerForSlot(
   const trainers = await TrainerProfile.find({ zoneIds: society.zoneId, isActive: true });
   const atoms = getSessionAtoms(slotStart);
 
-  const startOfDay = new Date(slotStart);
-  startOfDay.setHours(0, 0, 0, 0);
-  const endOfDay = new Date(slotStart);
-  endOfDay.setHours(23, 59, 59, 999);
+  const dayKey = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(slotStart);
+  const startOfDay = new Date(`${dayKey}T00:00:00+05:30`);
+  const endOfDay = new Date(startOfDay.getTime() + 24 * 60 * 60 * 1000 - 1);
 
   const evaluated: EvaluatedCandidate[] = [];
 
@@ -86,7 +85,7 @@ export async function findBestTrainerForSlot(
 
     const sessionsToday = await Booking.countDocuments({
       trainerId: t.userId,
-      startAt: { $gte: startOfDay, $lte: endOfDay },
+      startAt: { $gte: startOfDay,$lte: endOfDay },
       status: { $in: ['CONFIRMED', 'ON_THE_WAY', 'IN_PROGRESS', 'COMPLETED'] },
     });
 

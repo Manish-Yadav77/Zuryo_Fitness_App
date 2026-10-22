@@ -28,7 +28,10 @@ export const recordApi = {
     return data.record;
   },
   async getAiRecommendation(): Promise<AiWorkoutRecommendation> {
-    const { data } = await api.get<{ recommendation: AiWorkoutRecommendation }>('/records/ai-recommendation');
-    return data.recommendation;
-  },
+  const { data } = await api.get<{ recommendation: AiWorkoutRecommendation }>(
+    '/records/ai-recommendation',
+    { timeout: 55_000 },
+  );
+  return data.recommendation;
+},
 };

@@ -23,6 +23,7 @@ import type { CustomerPackage } from '@/types/package';
 import type { EligibleTrainerInfo, TimeSlotOption } from '@/types/availability';
 import { parseApiError } from '@/api/client';
 import { formatPaise } from '@/lib/money';
+import { todayIst } from '@/lib/time';
 
 import { Alert } from '@/components/ui/Alert';
 import { Button } from '@/components/ui/Button';
@@ -38,9 +39,7 @@ export default function BookPage() {
   const [societies, setSocieties] = useState<Society[]>([]);
   const [societyId, setSocietyId] = useState('');
   const [mode, setMode] = useState<BookingMode>('INSTANT');
-  const [selectedDate, setSelectedDate] = useState<string>(() =>
-    new Date().toISOString().slice(0, 10)
-  );
+  const [selectedDate, setSelectedDate] = useState<string>(() => todayIst());
 
   const [availableSlots, setAvailableSlots] = useState<TimeSlotOption[]>([]);
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
@@ -266,7 +265,7 @@ export default function BookPage() {
                 <input
                   type="date"
                   value={selectedDate}
-                  min={new Date().toISOString().slice(0, 10)}
+                  min={todayIst()}
                   onChange={(e) => setSelectedDate(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-medium text-slate-900 shadow-xs outline-none focus:border-emerald-500"
                 />

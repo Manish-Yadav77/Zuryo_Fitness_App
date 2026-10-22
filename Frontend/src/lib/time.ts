@@ -1,3 +1,8 @@
+/** Today's date in India as YYYY-MM-DD (not the UTC date). */
+export function todayIst(): string {
+  return new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata' }).format(new Date());
+}
+
 export function toIstString(date: Date): string {
   return new Intl.DateTimeFormat('en-IN', {
     timeZone: 'Asia/Kolkata',

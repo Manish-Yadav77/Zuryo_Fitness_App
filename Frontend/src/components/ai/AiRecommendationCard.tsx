@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Bot, CheckCircle, Dumbbell, Sparkles } from 'lucide-react';
+import { Bot, CheckCircle, Dumbbell, Sparkles, Heart } from 'lucide-react';
 import { recordApi } from '@/api/record.api';
 import type { AiWorkoutRecommendation } from '@/types/record';
 import { parseApiError } from '@/api/client';
@@ -14,10 +14,23 @@ export function AiRecommendationCard() {
   const [error, setError] = useState<string | null>(null);
 
   async function handleGenerate() {
+    if (loading) return;
     setError(null);
     setLoading(true);
     try {
-      const data = await recordApi.getAiRecommendation();
+      let data: AiWorkoutRecommendation;
+      try {
+        data = await recordApi.getAiRecommendation();
+      } catch (first) {
+        // One silent retry for network blips / server restart (tsx watch, Render wake-up).
+        const parsed = parseApiError(first);
+        if (parsed.code === 'NETWORK_ERROR' || parsed.code === 'TIMEOUT') {
+          await new Promise((r) => setTimeout(r, 2000));
+          data = await recordApi.getAiRecommendation();
+        } else {
+          throw first;
+        }
+      }
       setRecommendation(data);
     } catch (err) {
       setError(parseApiError(err).message);
@@ -38,10 +51,13 @@ export function AiRecommendationCard() {
             <p className="text-xs text-slate-500">Personalized routine tailored to your goals & history.</p>
           </div>
         </div>
-        <Badge tone="emerald">{recommendation ? `${recommendation.source} · ${recommendation.latencyMs}ms` : 'AI + rules fallback'}</Badge>
+        <Badge tone="emerald">
+          {recommendation ? `${recommendation.source} (${recommendation.latencyMs}ms)` : 'Multi-provider AI'}
+        </Badge>
       </div>
 
       {error && <Alert tone="error">{error}</Alert>}
+      {loading && <p className="text-center text-xs text-slate-500">Generating your plan… this can take up to 30 seconds.</p>}
 
       {!recommendation ? (
         <div className="py-4 text-center">
@@ -54,7 +70,7 @@ export function AiRecommendationCard() {
         </div>
       ) : (
         <div className="space-y-4 pt-2">
-          <div className="rounded-xl bg-white p-4 shadow-sm border border-emerald-100">
+          <div className="rounded-xl bg-white p-4 shadow-xs border border-emerald-100">
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-slate-900 text-sm">{recommendation.workoutTitle}</h3>
               <Badge tone="sky">{recommendation.focusArea}</Badge>
@@ -62,10 +78,10 @@ export function AiRecommendationCard() {
             <p className="mt-2 text-xs italic text-slate-600">"{recommendation.coachNote}"</p>
           </div>
 
-          <div className="grid gap-3 sm:grid-cols-2 text-xs">
+          <div className="grid gap-3 sm:grid-cols-3 text-xs">
             <div className="rounded-xl border border-slate-200 bg-white p-3">
               <span className="font-semibold text-slate-900 flex items-center gap-1.5 mb-2">
-                <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> Warm-Up (8 mins)
+                <CheckCircle className="h-3.5 w-3.5 text-emerald-600" /> Warm-Up
               </span>
               <ul className="list-disc list-inside space-y-1 text-slate-600">
                 {recommendation.warmUp.map((w, i) => (
@@ -76,7 +92,7 @@ export function AiRecommendationCard() {
 
             <div className="rounded-xl border border-slate-200 bg-white p-3">
               <span className="font-semibold text-slate-900 flex items-center gap-1.5 mb-2">
-                <Dumbbell className="h-3.5 w-3.5 text-emerald-600" /> Main Circuit (45 mins)
+                <Dumbbell className="h-3.5 w-3.5 text-emerald-600" /> Main Circuit
               </span>
               <ul className="space-y-1 text-slate-600">
                 {recommendation.mainCircuit.map((m, i) => (
@@ -84,6 +100,17 @@ export function AiRecommendationCard() {
                     <span>{m.exercise}</span>
                     <span className="font-semibold text-slate-900">{m.sets}x{m.reps}</span>
                   </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="rounded-xl border border-slate-200 bg-white p-3">
+              <span className="font-semibold text-slate-900 flex items-center gap-1.5 mb-2">
+                <Heart className="h-3.5 w-3.5 text-teal-600" /> Cool-Down
+              </span>
+              <ul className="list-disc list-inside space-y-1 text-slate-600">
+                {recommendation.coolDown.map((c, i) => (
+                  <li key={i}>{c}</li>
                 ))}
               </ul>
             </div>

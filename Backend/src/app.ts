@@ -5,6 +5,8 @@ import { env } from './config/env.js';
 import routes from './routes/index.js';
 import { errorHandler, notFoundHandler } from './middleware/error.js';
 
+const LOCAL_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?$/;
+
 export function createApp() {
   const app = express();
 
@@ -14,8 +16,14 @@ export function createApp() {
   app.use(helmet());
   app.use(
     cors({
-      origin: env.clientOrigins,
-      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
+      // In development accept any localhost / 127.0.0.1 port (Vite may pick 5174, 5175...).
+      origin: (origin, cb) => {
+        if (!origin) return cb(null, true);
+        if (env.clientOrigins.includes(origin)) return cb(null, true);
+        if (!env.isProduction && LOCAL_ORIGIN.test(origin)) return cb(null, true);
+        return cb(null, false);
+      },
+      methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
       allowedHeaders: ['Content-Type', 'Authorization', 'Idempotency-Key'],
     }),
   );

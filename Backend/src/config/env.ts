@@ -7,19 +7,16 @@ const envSchema = z
     MONGODB_URI: z.string().min(1, 'MONGODB_URI is required'),
     JWT_SECRET: z.string().min(32, 'JWT_SECRET must be at least 32 characters'),
     JWT_EXPIRES_IN_SECONDS: z.coerce.number().int().positive().default(60 * 60 * 12),
-    // Comma separated list of allowed browser origins
     CLIENT_ORIGIN: z.string().min(1).default('http://localhost:5173'),
     SEED_PASSWORD: z.string().min(8).default('Demo@12345'),
 
-    // Razorpay (TEST keys only)
     RAZORPAY_KEY_ID: z.string().optional(),
     RAZORPAY_KEY_SECRET: z.string().optional(),
 
-    // AI providers (used from Phase 16): Gemini now, NVIDIA added later
     LLM_API_KEY: z.string().optional(),
-    LLM_MODEL: z.string().default('gemini-2.5-flash'),
+    LLM_MODEL: z.string().default('gemini-3.8-flash'),
     NVIDIA_API_KEY: z.string().optional(),
-    NVIDIA_MODEL: z.string().default('meta/llama-3.1-70b-instruct'),
+    NVIDIA_MODEL: z.string().default('z-ai/glm-5.3-flash'),
     NVIDIA_BASE_URL: z.string().default('https://integrate.api.nvidia.com/v1'),
   })
   .superRefine((value, ctx) => {
@@ -32,7 +29,6 @@ const envSchema = z
     }
   });
 
-// Treat "KEY=" (empty value) the same as a missing variable.
 const cleaned = Object.fromEntries(Object.entries(process.env).filter(([, value]) => value !== ''));
 
 const parsed = envSchema.safeParse(cleaned);

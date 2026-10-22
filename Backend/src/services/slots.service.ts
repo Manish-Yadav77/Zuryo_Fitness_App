@@ -21,13 +21,21 @@ export interface EligibleTrainerInfo {
   distanceKm: number;
 }
 
+const IST_DAY_FORMAT = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Kolkata',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
 export async function getAvailableSlotsForDay(societyId: string, dateStr: string, preferredTrainerId?: string) {
   const society = await Society.findById(societyId);
   if (!society) return [];
 
-  const date = new Date(dateStr);
-  const startOfDay = new Date(date);
-  startOfDay.setHours(0, 0, 0, 0);
+  const dayKey = /^\d{4}-\d{2}-\d{2}$/.test(dateStr)
+    ? dateStr
+    : IST_DAY_FORMAT.format(new Date(dateStr));
+  const dayStartMs = new Date(`${dayKey}T00:00:00+05:30`).getTime();
 
   const now = new Date();
   const minStart = new Date(now.getTime() + 10 * 60 * 1000); // Minimum 10 mins buffer from current time
@@ -39,8 +47,7 @@ export async function getAvailableSlotsForDay(societyId: string, dateStr: string
     for (let min = 0; min < 60; min += 15) {
       if (hour === 21 && min > 0) break;
 
-      const slotStart = new Date(startOfDay);
-      slotStart.setHours(hour, min, 0, 0);
+      const slotStart = new Date(dayStartMs + (hour * 60 + min) * 60_000);
 
       // Do not return past time slots
       if (slotStart < minStart) continue;
