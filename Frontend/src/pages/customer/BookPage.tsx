@@ -178,7 +178,7 @@ export default function BookPage() {
 
   if (loading) {
     return (
-      <div className="flex min-h-[300px] items-center justify-center py-12 text-sm text-slate-500">
+      <div className="flex min-h-75 items-center justify-center py-12 text-sm text-slate-500">
         Loading booking engine...
       </div>
     );
