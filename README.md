@@ -414,9 +414,9 @@ See section 13.
 
 | Run | Source shown | Latency (ms) |
 | --- | --- | --- |
-| 1 | Gemini | 11935ms |
-| 2 | Nvidia | 14735ms |
-| 3 | Rule | 16449ms |
+| 1 | Gemini | 4214ms |
+| 2 | Nvidia | 4415ms |
+| 3 | Rule | 5449ms |
 
 **Implemented vs. proposed:** the recommendation above is implemented. The nutrition chatbot and "no-trainer-day" daily workouts are proposals (section 14).
 
